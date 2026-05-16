@@ -1,0 +1,413 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BOLD='\033[1m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+usage() {
+    echo -e "${BOLD}feline clean${RESET} — free up space by clearing caches and junk"
+    echo ""
+    echo -e "${BOLD}Usage:${RESET}"
+    echo "  feline clean [targets...] [--dir <path>] [--dry-run]"
+    echo ""
+    echo -e "${BOLD}Targets (default: all standard):${RESET}"
+    echo -e "  ${BOLD}Standard${RESET}"
+    echo "  caches        ~/Library/Caches"
+    echo "  logs          ~/Library/Logs"
+    echo "  trash         ~/.Trash"
+    echo "  brew          Homebrew download cache"
+    echo "  xcode         Xcode derived data & archives"
+    echo "  npm           npm cache"
+    echo "  pip           pip cache"
+    echo "  yarn          yarn cache"
+    echo "  gem           Ruby gem cache"
+    echo ""
+    echo -e "  ${BOLD}Browsers${RESET}"
+    echo "  browsers      Safari, Chrome, and Firefox caches"
+    echo ""
+    echo -e "  ${BOLD}iOS${RESET}"
+    echo "  ios-sim       Unavailable iOS simulator devices & caches"
+    echo ""
+    echo -e "  ${BOLD}Search-based${RESET} (use --dir to set search root)"
+    echo "  ds-store      .DS_Store files           (default: \$HOME)"
+    echo "  node-modules  node_modules folders       (default: current dir)"
+    echo "  pycache       __pycache__ folders        (default: current dir)"
+    echo ""
+    echo -e "${BOLD}Options:${RESET}"
+    echo "  --dir <path>  Root path for search-based targets"
+    echo "  --dry-run     Show what would be removed without deleting anything"
+    echo ""
+    echo -e "${BOLD}Examples:${RESET}"
+    echo "  feline clean"
+    echo "  feline clean trash browsers"
+    echo "  feline clean node-modules --dir ~/Projects"
+    echo "  feline clean --dry-run"
+    exit 0
+}
+
+# Human-readable size for a list of paths
+multi_size() {
+    local total=0
+    for p in "$@"; do
+        [[ -e "$p" ]] || continue
+        local bytes
+        bytes=$(du -sk "$p" 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
+        total=$(( total + bytes ))
+    done
+    fmt_kb $total
+}
+
+fmt_kb() {
+    local kb="$1"
+    if (( kb >= 1048576 )); then
+        printf "%.1fG" "$(echo "scale=1; $kb/1048576" | bc)"
+    elif (( kb >= 1024 )); then
+        printf "%.1fM" "$(echo "scale=1; $kb/1024" | bc)"
+    else
+        printf "%dK" "$kb"
+    fi
+}
+
+# ── Argument parsing ───────────────────────────────────────────────────────────
+DRY_RUN=false
+TARGETS=()
+SEARCH_DIR=""
+
+VALID_TARGETS="caches logs trash brew xcode npm pip yarn gem browsers ios-sim ds-store node-modules pycache"
+
+i=1
+while [[ $i -le $# ]]; do
+    arg="${!i}"
+    case "$arg" in
+        --help|-h)  usage ;;
+        --dry-run)  DRY_RUN=true ;;
+        --dir)
+            i=$(( i + 1 ))
+            SEARCH_DIR="${!i}"
+            [[ -d "$SEARCH_DIR" ]] || { echo -e "${RED}Error:${RESET} --dir path not found: $SEARCH_DIR" >&2; exit 1; }
+            ;;
+        *)
+            if echo "$VALID_TARGETS" | grep -qw "$arg"; then
+                TARGETS+=("$arg")
+            else
+                echo -e "${RED}Unknown target:${RESET} '$arg'" >&2
+                echo "Run 'feline clean --help' to see valid targets." >&2
+                exit 1
+            fi
+            ;;
+    esac
+    i=$(( i + 1 ))
+done
+
+STANDARD_TARGETS=(caches logs trash brew xcode npm pip yarn gem)
+[[ ${#TARGETS[@]} -eq 0 ]] && TARGETS=("${STANDARD_TARGETS[@]}")
+
+# ── Path resolvers ─────────────────────────────────────────────────────────────
+declare -A TARGET_LABEL=(
+    [caches]="App caches"
+    [logs]="Log files"
+    [trash]="Trash"
+    [brew]="Homebrew cache"
+    [xcode]="Xcode derived data"
+    [npm]="npm cache"
+    [pip]="pip cache"
+    [yarn]="yarn cache"
+    [gem]="Ruby gem cache"
+    [browsers]="Browser caches"
+    [ios-sim]="iOS simulators"
+    [ds-store]=".DS_Store files"
+    [node-modules]="node_modules folders"
+    [pycache]="Python __pycache__"
+)
+
+# Returns one path per line so callers can safely use `mapfile`.
+# (Previously echoed space-separated paths, which broke on paths containing
+# spaces like "Application Support".)
+get_paths() {
+    case "$1" in
+        caches)  printf '%s\n' "$HOME/Library/Caches" ;;
+        logs)    printf '%s\n' "$HOME/Library/Logs" ;;
+        trash)   printf '%s\n' "$HOME/.Trash" ;;
+        brew)    command -v brew &>/dev/null && brew --cache || true ;;
+        xcode)
+            printf '%s\n' "$HOME/Library/Developer/Xcode/DerivedData" \
+                          "$HOME/Library/Developer/Xcode/Archives"
+            ;;
+        npm)     command -v npm &>/dev/null && npm config get cache 2>/dev/null || true ;;
+        pip)     printf '%s\n' "$HOME/Library/Caches/pip" ;;
+        yarn)
+            if command -v yarn &>/dev/null; then
+                yarn cache dir 2>/dev/null
+            else
+                printf '%s\n' "$HOME/.yarn/berry/cache" "$HOME/Library/Caches/yarn"
+            fi
+            ;;
+        gem)
+            if command -v gem &>/dev/null; then
+                local g; g=$(gem environment gemdir 2>/dev/null) && printf '%s\n' "$g/cache"
+            fi
+            ;;
+        browsers)
+            printf '%s\n' \
+                "$HOME/Library/Caches/com.apple.Safari" \
+                "$HOME/Library/Containers/com.apple.Safari/Data/Library/Caches" \
+                "$HOME/Library/Application Support/Google/Chrome/Default/Cache" \
+                "$HOME/Library/Caches/Google/Chrome" \
+                "$HOME/Library/Caches/BraveSoftware" \
+                "$HOME/Library/Application Support/Firefox/Profiles"
+            ;;
+        ios-sim) printf '%s\n' "$HOME/Library/Developer/CoreSimulator/Caches" ;;
+    esac
+}
+
+# ── Scan phase ─────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}feline clean${RESET} — scanning..."
+echo ""
+
+declare -A TARGET_SIZE
+ALL_PATHS=()
+
+for t in "${TARGETS[@]}"; do
+    case "$t" in
+        ds-store|node-modules|pycache)
+            # These are find-based; show placeholder until we scan
+            TARGET_SIZE[$t]="scanning..."
+            ;;
+        ios-sim)
+            # Show CoreSimulator/Caches size + note about unavailable devices
+            mapfile -t paths < <(get_paths ios-sim)
+            sz=$(multi_size "${paths[@]}")
+            TARGET_SIZE[$t]="$sz"
+            for p in "${paths[@]}"; do [[ -e "$p" ]] && ALL_PATHS+=("$p"); done
+            ;;
+        brew)
+            # brew --cache is a single dir
+            BREW_CACHE=$(command -v brew &>/dev/null && brew --cache 2>/dev/null || true)
+            sz=$(multi_size "$BREW_CACHE")
+            TARGET_SIZE[$t]="$sz"
+            [[ -n "$BREW_CACHE" && -e "$BREW_CACHE" ]] && ALL_PATHS+=("$BREW_CACHE")
+            ;;
+        *)
+            mapfile -t paths < <(get_paths "$t")
+            sz=$(multi_size "${paths[@]}")
+            TARGET_SIZE[$t]="$sz"
+            for p in "${paths[@]}"; do [[ -e "$p" ]] && ALL_PATHS+=("$p"); done
+            ;;
+    esac
+    printf "  %-22s %s\n" "${TARGET_LABEL[$t]}" "${TARGET_SIZE[$t]}"
+done
+
+# Run find-based scans after the table so it reads cleanly
+FIND_RESULTS=()
+for t in "${TARGETS[@]}"; do
+    case "$t" in
+        ds-store)
+            ROOT="${SEARCH_DIR:-$HOME}"
+            mapfile -t found < <(find "$ROOT" -name ".DS_Store" 2>/dev/null)
+            COUNT=${#found[@]}
+            SZ=0
+            for f in "${found[@]}"; do
+                b=$(du -k "$f" 2>/dev/null | cut -f1)
+                SZ=$(( SZ + b ))
+            done
+            TARGET_SIZE[$t]="${COUNT} files ($(fmt_kb $SZ))"
+            FIND_RESULTS+=("ds-store:$ROOT")
+            ;;
+        node-modules)
+            ROOT="${SEARCH_DIR:-$(pwd)}"
+            mapfile -t found < <(find "$ROOT" -name "node_modules" -type d -prune 2>/dev/null)
+            COUNT=${#found[@]}
+            SZ=0
+            for f in "${found[@]}"; do
+                b=$(du -sk "$f" 2>/dev/null | cut -f1)
+                SZ=$(( SZ + b ))
+            done
+            TARGET_SIZE[$t]="${COUNT} dirs ($(fmt_kb $SZ))"
+            FIND_RESULTS+=("node-modules:$ROOT")
+            ;;
+        pycache)
+            ROOT="${SEARCH_DIR:-$(pwd)}"
+            mapfile -t found < <(find "$ROOT" -name "__pycache__" -type d 2>/dev/null)
+            COUNT=${#found[@]}
+            SZ=0
+            for f in "${found[@]}"; do
+                b=$(du -sk "$f" 2>/dev/null | cut -f1)
+                SZ=$(( SZ + b ))
+            done
+            TARGET_SIZE[$t]="${COUNT} dirs ($(fmt_kb $SZ))"
+            FIND_RESULTS+=("pycache:$ROOT")
+            ;;
+    esac
+done
+
+# Reprint find-based rows with real sizes now that we have them
+if [[ ${#FIND_RESULTS[@]} -gt 0 ]]; then
+    echo ""
+    echo -e "  ${DIM}(search-based targets)${RESET}"
+    for entry in "${FIND_RESULTS[@]}"; do
+        t="${entry%%:*}"
+        printf "  %-22s %s\n" "${TARGET_LABEL[$t]}" "${TARGET_SIZE[$t]}"
+    done
+fi
+
+echo ""
+TOTAL=$(multi_size "${ALL_PATHS[@]}")
+echo -e "  ${BOLD}Total reclaimable:${RESET}   ${YELLOW}${TOTAL}${RESET}"
+echo ""
+
+if $DRY_RUN; then
+    echo -e "${DIM}Dry run — nothing was deleted.${RESET}"
+    exit 0
+fi
+
+# ── Confirm ────────────────────────────────────────────────────────────────────
+echo -n -e "Clean these up? ${BOLD}[y/n/s (select)]:${RESET} "
+read -r ANSWER
+
+case "$ANSWER" in
+    [Nn]*) echo -e "${DIM}Cancelled.${RESET}"; exit 0 ;;
+    [Ss]*)
+        echo ""
+        echo -e "${BOLD}Select targets to clean${RESET} ${DIM}(toggle with number, confirm with 'done' or 'd'):${RESET}"
+        echo ""
+
+        # Build indexed arrays for the picker
+        declare -a PICK_KEYS=("${TARGETS[@]}")
+        declare -A PICK_ON
+        for t in "${TARGETS[@]}"; do PICK_ON[$t]=1; done
+
+        while true; do
+            for i in "${!PICK_KEYS[@]}"; do
+                t="${PICK_KEYS[$i]}"
+                num=$(( i + 1 ))
+                if [[ "${PICK_ON[$t]}" -eq 1 ]]; then
+                    marker="${GREEN}[✓]${RESET}"
+                else
+                    marker="${DIM}[ ]${RESET}"
+                fi
+                printf "  %b  %2d  %-22s %s\n" "$marker" "$num" "${TARGET_LABEL[$t]}" "${TARGET_SIZE[$t]}"
+            done
+            echo ""
+            echo -e "  ${DIM}Enter a number to toggle, 'a' to select all, 'x' to deselect all, 'd' to confirm:${RESET}"
+            echo -n -e "  ${BOLD}>${RESET} "
+            read -r SEL
+
+            case "$SEL" in
+                [Dd]*|"") break ;;
+                [Aa]*)    for t in "${PICK_KEYS[@]}"; do PICK_ON[$t]=1; done ;;
+                [Xx]*)    for t in "${PICK_KEYS[@]}"; do PICK_ON[$t]=0; done ;;
+                *)
+                    # Accept space or comma separated numbers
+                    for token in $(echo "$SEL" | tr ',' ' '); do
+                        if [[ "$token" =~ ^[0-9]+$ ]]; then
+                            idx=$(( token - 1 ))
+                            if [[ $idx -ge 0 && $idx -lt ${#PICK_KEYS[@]} ]]; then
+                                t="${PICK_KEYS[$idx]}"
+                                PICK_ON[$t]=$(( 1 - PICK_ON[$t] ))
+                            fi
+                        fi
+                    done
+                    ;;
+            esac
+            echo ""
+        done
+
+        # Rebuild TARGETS from selection
+        SELECTED=()
+        for t in "${PICK_KEYS[@]}"; do
+            [[ "${PICK_ON[$t]}" -eq 1 ]] && SELECTED+=("$t")
+        done
+
+        if [[ ${#SELECTED[@]} -eq 0 ]]; then
+            echo -e "${DIM}Nothing selected. Cancelled.${RESET}"
+            exit 0
+        fi
+
+        TARGETS=("${SELECTED[@]}")
+        echo ""
+        ;;
+esac
+echo ""
+
+# ── Clean helpers ──────────────────────────────────────────────────────────────
+TOTAL_FREED_KB=0
+
+clean_paths() {
+    local label="$1"; shift
+    local existing=()
+    for p in "$@"; do [[ -e "$p" ]] && existing+=("$p"); done
+    [[ ${#existing[@]} -eq 0 ]] && { echo -e "  ${DIM}${label}: nothing to clean${RESET}"; return; }
+
+    local before
+    before=$(du -sk "${existing[@]}" 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
+    rm -rf "${existing[@]}"
+    TOTAL_FREED_KB=$(( TOTAL_FREED_KB + before ))
+    echo -e "  ${GREEN}✓${RESET} ${label} ${DIM}($(fmt_kb $before) freed)${RESET}"
+}
+
+clean_find() {
+    local label="$1" pattern="$2" root="$3"
+    mapfile -t found < <(find "$root" -name "$pattern" ${4:+-type "$4"} -prune 2>/dev/null)
+    [[ ${#found[@]} -eq 0 ]] && { echo -e "  ${DIM}${label}: nothing found${RESET}"; return; }
+
+    local before=0
+    for f in "${found[@]}"; do
+        local b; b=$(du -sk "$f" 2>/dev/null | cut -f1)
+        before=$(( before + b ))
+    done
+    rm -rf "${found[@]}"
+    TOTAL_FREED_KB=$(( TOTAL_FREED_KB + before ))
+    echo -e "  ${GREEN}✓${RESET} ${label} ${DIM}(${#found[@]} removed, $(fmt_kb $before) freed)${RESET}"
+}
+
+# ── Clean ──────────────────────────────────────────────────────────────────────
+for t in "${TARGETS[@]}"; do
+    case "$t" in
+        brew)
+            if command -v brew &>/dev/null; then
+                BREW_CACHE=$(brew --cache 2>/dev/null || true)
+                before=$(du -sk "$BREW_CACHE" 2>/dev/null | cut -f1 || echo 0)
+                brew cleanup -q 2>/dev/null || true
+                echo -e "  ${GREEN}✓${RESET} Homebrew cache ${DIM}($(fmt_kb $before) freed)${RESET}"
+                TOTAL_FREED_KB=$(( TOTAL_FREED_KB + before ))
+            fi
+            ;;
+        ios-sim)
+            if command -v xcrun &>/dev/null; then
+                echo -e "  ${GREEN}✓${RESET} Removing unavailable iOS simulators..."
+                xcrun simctl delete unavailable 2>/dev/null || true
+            fi
+            mapfile -t paths < <(get_paths ios-sim)
+            clean_paths "${TARGET_LABEL[$t]}" "${paths[@]}"
+            ;;
+        browsers)
+            mapfile -t paths < <(get_paths browsers)
+            clean_paths "${TARGET_LABEL[$t]}" "${paths[@]}"
+            ;;
+        ds-store)
+            ROOT="${SEARCH_DIR:-$HOME}"
+            clean_find "${TARGET_LABEL[$t]}" ".DS_Store" "$ROOT" ""
+            ;;
+        node-modules)
+            ROOT="${SEARCH_DIR:-$(pwd)}"
+            clean_find "${TARGET_LABEL[$t]}" "node_modules" "$ROOT" "d"
+            ;;
+        pycache)
+            ROOT="${SEARCH_DIR:-$(pwd)}"
+            clean_find "${TARGET_LABEL[$t]}" "__pycache__" "$ROOT" "d"
+            ;;
+        *)
+            mapfile -t paths < <(get_paths "$t")
+            clean_paths "${TARGET_LABEL[$t]}" "${paths[@]}"
+            ;;
+    esac
+done
+
+echo ""
+echo -e "${GREEN}Done.${RESET} Freed ${BOLD}$(fmt_kb $TOTAL_FREED_KB)${RESET} of space."

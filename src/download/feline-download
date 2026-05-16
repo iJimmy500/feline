@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BOLD='\033[1m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+usage() {
+    echo -e "${BOLD}feline download${RESET} — download a file or video from the internet"
+    echo ""
+    echo -e "${BOLD}Usage:${RESET}"
+    echo "  feline download <url> [filetype]"
+    echo ""
+    echo -e "${BOLD}Examples:${RESET}"
+    echo "  feline download https://example.com/photo.png"
+    echo "  feline download https://youtube.com/watch?v=xyz mp4"
+    echo "  feline download https://youtube.com/watch?v=xyz mp3"
+    echo "  feline download https://example.com/page html"
+    echo ""
+    echo -e "${BOLD}Notes:${RESET}"
+    echo "  Video URLs (YouTube, Vimeo, etc.) require yt-dlp: brew install yt-dlp"
+    exit 0
+}
+
+die() {
+    echo -e "${RED}Error:${RESET} $1" >&2
+    exit 1
+}
+
+is_video_url() {
+    [[ "$1" =~ (youtube\.com|youtu\.be|vimeo\.com|twitch\.tv|dailymotion\.com|tiktok\.com) ]]
+}
+
+require_cmd() {
+    command -v "$1" &>/dev/null || die "$1 is required but not installed. Install with: brew install $1"
+}
+
+[[ $# -lt 1 || "$1" == "--help" || "$1" == "-h" ]] && usage
+
+URL="$1"
+FILETYPE="${2:-}"
+
+if is_video_url "$URL"; then
+    require_cmd yt-dlp
+
+    echo -e "${CYAN}Video URL detected.${RESET}"
+
+    if [[ -n "$FILETYPE" ]]; then
+        case "$FILETYPE" in
+            mp3|m4a|wav|flac|opus)
+                echo -e "${DIM}Extracting audio as ${FILETYPE}...${RESET}"
+                yt-dlp --extract-audio --audio-format "$FILETYPE" --audio-quality 0 "$URL"
+                ;;
+            *)
+                echo -e "${DIM}Downloading as ${FILETYPE}...${RESET}"
+                yt-dlp --merge-output-format "$FILETYPE" "$URL"
+                ;;
+        esac
+    else
+        echo -e "${DIM}Downloading best available quality...${RESET}"
+        yt-dlp "$URL"
+    fi
+
+    echo -e "${GREEN}Done.${RESET}"
+else
+    require_cmd curl
+
+    # Pull filename from the URL path, strip query string
+    FILENAME=$(basename "${URL%%\?*}")
+
+    # If empty or looks like a directory index, use "download"
+    if [[ -z "$FILENAME" || "$FILENAME" == "/" || ! "$FILENAME" == *.* ]]; then
+        FILENAME="download"
+    fi
+
+    # Apply requested filetype override
+    if [[ -n "$FILETYPE" ]]; then
+        FILENAME="${FILENAME%.*}.${FILETYPE}"
+    fi
+
+    # Avoid silently overwriting existing files
+    if [[ -f "$FILENAME" ]]; then
+        BASE="${FILENAME%.*}"
+        EXT="${FILENAME##*.}"
+        N=1
+        while [[ -f "${BASE}_${N}.${EXT}" ]]; do (( N++ )); done
+        FILENAME="${BASE}_${N}.${EXT}"
+        echo -e "${YELLOW}File exists — saving as${RESET} ${BOLD}${FILENAME}${RESET}"
+    fi
+
+    echo -e "${CYAN}Downloading${RESET} ${BOLD}${FILENAME}${RESET}..."
+    curl -L --progress-bar -o "$FILENAME" "$URL"
+    SIZE=$(du -sh "$FILENAME" 2>/dev/null | cut -f1)
+    echo -e "${GREEN}Saved:${RESET} ${BOLD}${FILENAME}${RESET} ${DIM}(${SIZE})${RESET}"
+fi

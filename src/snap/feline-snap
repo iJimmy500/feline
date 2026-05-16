@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+import subprocess
+import sys
+import os
+import re
+from datetime import datetime
+
+BOLD   = '\033[1m'
+GREEN  = '\033[0;32m'
+RED    = '\033[0;31m'
+YELLOW = '\033[1;33m'
+CYAN   = '\033[0;36m'
+DIM    = '\033[2m'
+BLUE   = '\033[0;34m'
+RESET  = '\033[0m'
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def run(cmd):
+    try:
+        return subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True).strip()
+    except Exception:
+        return ""
+
+def rule(title="", width=52):
+    if title:
+        pad = max(width - len(title) - 4, 2)
+        return f"{DIM}── {RESET}{BOLD}{title}{RESET}{DIM} {'─' * pad}{RESET}"
+    return f"{DIM}{'─' * width}{RESET}"
+
+def row(label, value, color=""):
+    return f"  {DIM}{label:<16}{RESET}{color}{value}{RESET if color else ''}"
+
+def bar(pct, width=20):
+    filled = int(pct / 100 * width)
+    empty  = width - filled
+    if pct >= 80:   color = RED
+    elif pct >= 50: color = YELLOW
+    else:           color = GREEN
+    return f"{color}{'█' * filled}{DIM}{'░' * empty}{RESET} {pct:.0f}%"
+
+# ── Battery ────────────────────────────────────────────────────────────────────
+
+def get_battery():
+    raw = run(['pmset', '-g', 'batt'])
+    if not raw:
+        return None
+
+    result = {}
+
+    # Charge percentage
+    pct_match = re.search(r'(\d+)%', raw)
+    result['pct'] = int(pct_match.group(1)) if pct_match else None
+
+    # Status: charging / discharging / charged
+    if 'charging' in raw and 'dis' not in raw.split('charging')[0].split('\n')[-1]:
+        result['status'] = 'charging'
+    elif 'discharging' in raw:
+        result['status'] = 'discharging'
+    elif 'charged' in raw:
+        result['status'] = 'charged'
+    else:
+        result['status'] = 'unknown'
+
+    # Time remaining
+    time_match = re.search(r'(\d+:\d+) remaining', raw)
+    result['remaining'] = time_match.group(1) if time_match else None
+
+    # Power source
+    result['ac'] = 'AC Power' in raw
+
+    # Battery health via system_profiler (slower but accurate)
+    sp = run(['system_profiler', 'SPPowerDataType'])
+    cycle_match  = re.search(r'Cycle Count:\s*(\d+)', sp)
+    health_match = re.search(r'Condition:\s*(\w[\w ]+)', sp)
+    cap_match    = re.search(r'Maximum Capacity:\s*(\d+)%', sp)
+
+    result['cycles']   = int(cycle_match.group(1))  if cycle_match  else None
+    result['health']   = health_match.group(1).strip() if health_match else None
+    result['capacity'] = int(cap_match.group(1))    if cap_match    else None
+
+    return result
+
+# ── Memory ─────────────────────────────────────────────────────────────────────
+
+def get_memory():
+    total_bytes = int(run(['sysctl', '-n', 'hw.memsize']) or 0)
+    total_gb    = total_bytes / (1024 ** 3)
+
+    vm = run(['vm_stat'])
+    pages = {}
+    for line in vm.splitlines():
+        m = re.match(r'Pages\s+(\w[\w ]+):\s+(\d+)', line)
+        if m:
+            pages[m.group(1).strip()] = int(m.group(2))
+
+    page_size   = 4096
+    wired       = pages.get('wired down', 0)       * page_size
+    active      = pages.get('active', 0)           * page_size
+    compressed  = pages.get('occupied by compressor', 0) * page_size
+    free        = pages.get('free', 0)             * page_size
+
+    used        = wired + active + compressed
+    used_gb     = used / (1024 ** 3)
+    pct         = (used_gb / total_gb * 100) if total_gb else 0
+
+    # Pressure level from memory_pressure tool
+    pressure_raw = run(['memory_pressure'])
+    if 'Critical' in pressure_raw:
+        pressure = 'Critical'
+    elif 'Warn' in pressure_raw:
+        pressure = 'Warning'
+    else:
+        pressure = 'Normal'
+
+    return {
+        'total_gb': total_gb,
+        'used_gb':  used_gb,
+        'free_gb':  free / (1024 ** 3),
+        'pct':      pct,
+        'pressure': pressure,
+    }
+
+# ── CPU & processes ────────────────────────────────────────────────────────────
+
+SYSTEM_PROCS = {
+    'kernel_task', 'launchd', 'WindowServer', 'loginwindow', 'Dock',
+    'SystemUIServer', 'mds', 'mds_stores', 'mdworker', 'coreaudiod',
+    'cfprefsd', 'distnoted', 'UserEventAgent', 'bluetoothd', 'WiFiAgent',
+    'CommCenter', 'rapportd', 'trustd', 'nsurlsessiond', 'sharingd',
+    'symptomsd', 'powerd', 'logd', 'configd', 'notifyd', 'opendirectoryd',
+    'syslogd', 'diskarbitrationd', 'corebrightnessd', 'hidd', 'amfid',
+}
+
+def get_processes():
+    raw = run(['ps', 'aux'])
+    current_user = os.environ.get('USER', '')
+    procs = []
+
+    for line in raw.splitlines()[1:]:
+        parts = line.split(None, 10)
+        if len(parts) < 11:
+            continue
+        user, pid, cpu, mem = parts[0], parts[1], parts[2], parts[3]
+        cmd_full = parts[10]
+
+        # Only current user's processes
+        if user != current_user:
+            continue
+
+        try:
+            cpu_f = float(cpu)
+            mem_f = float(mem)
+        except ValueError:
+            continue
+
+        # Get a clean display name
+        name = os.path.basename(cmd_full.split()[0])
+        if name.startswith('-'):
+            name = name[1:]
+
+        # Skip system/helper processes
+        if name in SYSTEM_PROCS or name.startswith('com.apple.') or not name:
+            continue
+
+        procs.append({'name': name, 'pid': pid, 'cpu': cpu_f, 'mem_pct': mem_f, 'cmd': cmd_full})
+
+    top_cpu = sorted(procs, key=lambda x: x['cpu'],     reverse=True)[:6]
+    top_mem = sorted(procs, key=lambda x: x['mem_pct'], reverse=True)[:6]
+    return top_cpu, top_mem
+
+def get_total_cpu():
+    top_raw = run(['top', '-l', '1', '-s', '0', '-n', '0'])
+    m = re.search(r'CPU usage:\s+([\d.]+)% user,\s+([\d.]+)% sys', top_raw)
+    if m:
+        return float(m.group(1)) + float(m.group(2))
+    return None
+
+def get_uptime():
+    raw = run(['uptime'])
+    m = re.search(r'up\s+(.*?),\s+\d+ user', raw)
+    return m.group(1).strip() if m else None
+
+# ── Recommendations ────────────────────────────────────────────────────────────
+
+# Known apps that are notorious resource hogs
+KNOWN_HEAVY = {
+    'Google Chrome': 'known for high memory and CPU use — try closing unused tabs',
+    'Chrome':        'known for high memory and CPU use — try closing unused tabs',
+    'Slack':         'known to use significant memory in the background',
+    'Microsoft Teams': 'known for high background CPU and memory',
+    'Zoom':          'can use significant CPU even when not in a call',
+    'Xcode':         'heavy IDE — close if not actively building',
+    'Docker':        'background VMs consume RAM constantly',
+    'Spotify':       'known for unexpected background CPU spikes',
+    'Discord':       'Electron app with consistently high memory use',
+    'VS Code':       'can accumulate memory over long sessions',
+    'Figma':         'GPU and memory intensive',
+    'Electron':      'generic Electron process — identify and close if unneeded',
+}
+
+def build_recommendations(battery, memory, top_cpu, top_mem):
+    recs = []
+
+    # Battery recommendations
+    if battery:
+        pct = battery.get('pct')
+        status = battery.get('status')
+        capacity = battery.get('capacity')
+        health = battery.get('health')
+
+        if pct is not None and pct <= 10 and status == 'discharging':
+            recs.append(('critical', f'Battery critically low ({pct}%) — plug in now'))
+        elif pct is not None and pct <= 25 and status == 'discharging':
+            recs.append(('warn', f'Battery at {pct}% — consider plugging in soon'))
+
+        if capacity is not None and capacity < 80:
+            recs.append(('warn', f'Battery capacity at {capacity}% — consider a battery service'))
+        elif health and health.lower() not in ('normal', 'good'):
+            recs.append(('warn', f'Battery condition: {health} — may need service'))
+
+    # Memory recommendations
+    if memory:
+        pressure = memory.get('pressure', 'Normal')
+        if pressure == 'Critical':
+            recs.append(('critical', 'Memory pressure is critical — close apps to prevent slowdowns'))
+        elif pressure == 'Warning':
+            recs.append(('warn', 'Memory pressure is elevated — consider closing unused apps'))
+
+    # CPU hogs
+    for p in top_cpu:
+        if p['cpu'] >= 40:
+            hint = KNOWN_HEAVY.get(p['name'], 'using high CPU — consider closing it')
+            recs.append(('warn', f"{p['name']} is using {p['cpu']:.0f}% CPU — {hint}"))
+        elif p['cpu'] >= 20:
+            recs.append(('info', f"{p['name']} is using {p['cpu']:.0f}% CPU"))
+
+    # Memory hogs (top_mem uses %)
+    for p in top_mem[:3]:
+        if p['mem_pct'] >= 5:
+            hint = KNOWN_HEAVY.get(p['name'], 'using significant memory')
+            recs.append(('info', f"{p['name']} is {hint}"))
+
+    # Known heavy apps that are running at all
+    running_names = {p['name'] for p in top_cpu + top_mem}
+    for app, hint in KNOWN_HEAVY.items():
+        if app in running_names:
+            # Already covered by CPU/mem recommendations
+            continue
+        # Check if it's running at all via ps
+        if run(['pgrep', '-x', app]):
+            recs.append(('info', f"{app} is running — {hint}"))
+
+    # Deduplicate
+    seen = set()
+    unique = []
+    for rec in recs:
+        key = rec[1][:40]
+        if key not in seen:
+            seen.add(key)
+            unique.append(rec)
+
+    return unique
+
+
+# ── Main ───────────────────────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ('--help', '-h'):
+        print(f"{BOLD}feline snap{RESET} — system snapshot with speed and battery recommendations")
+        print()
+        print(f"{BOLD}Usage:{RESET}")
+        print("  feline snap")
+        print()
+        print("Shows battery status, memory pressure, top CPU and memory")
+        print("processes, and actionable recommendations for improving")
+        print("performance and battery life.")
+        sys.exit(0)
+
+    print()
+    print(f"{BOLD}feline snap{RESET}{DIM} — {datetime.now().strftime('%b %d  %I:%M %p')}{RESET}")
+    print(rule())
+
+    # ── Battery ───────────────────────────────────────────────────────────────
+    battery = get_battery()
+    if battery and battery.get('pct') is not None:
+        print(rule("Battery"))
+        pct    = battery['pct']
+        status = battery['status']
+
+        if status == 'charging':
+            status_str = f"{GREEN}charging{RESET}"
+        elif status == 'charged':
+            status_str = f"{GREEN}fully charged{RESET}"
+        else:
+            status_str = f"{YELLOW}discharging{RESET}"
+
+        charge_bar = bar(pct)
+        print(f"  {DIM}{'Charge':<16}{RESET}{charge_bar}  {status_str}")
+
+        if battery.get('remaining') and status == 'discharging':
+            print(row("Time left",  battery['remaining'] + " remaining"))
+        if battery.get('capacity'):
+            cap = battery['capacity']
+            cap_color = RED if cap < 80 else (YELLOW if cap < 90 else GREEN)
+            print(row("Health",     f"{cap_color}{cap}% capacity{RESET}"))
+        if battery.get('cycles'):
+            print(row("Cycles",     str(battery['cycles'])))
+        if battery.get('health'):
+            print(row("Condition",  battery['health']))
+
+    # ── Performance ───────────────────────────────────────────────────────────
+    memory  = get_memory()
+    cpu_pct = get_total_cpu()
+    uptime  = get_uptime()
+
+    print()
+    print(rule("Performance"))
+
+    if cpu_pct is not None:
+        print(f"  {DIM}{'CPU':<16}{RESET}{bar(cpu_pct)}")
+
+    if memory:
+        used = memory['used_gb']
+        total = memory['total_gb']
+        pct  = memory['pct']
+        pressure = memory['pressure']
+
+        pressure_color = RED if pressure == 'Critical' else (YELLOW if pressure == 'Warning' else GREEN)
+        print(f"  {DIM}{'Memory':<16}{RESET}{bar(pct)}  {DIM}{used:.1f} / {total:.0f} GB{RESET}")
+        print(row("Pressure",   f"{pressure_color}{pressure}{RESET}"))
+
+    if uptime:
+        print(row("Uptime",     uptime))
+
+    # ── Top CPU ───────────────────────────────────────────────────────────────
+    top_cpu, top_mem = get_processes()
+
+    if top_cpu:
+        print()
+        print(rule("Top CPU"))
+        for p in top_cpu:
+            if p['cpu'] < 0.5:
+                break
+            color = RED if p['cpu'] >= 40 else (YELLOW if p['cpu'] >= 15 else DIM)
+            print(f"  {color}{p['cpu']:>5.1f}%{RESET}  {p['name']}")
+
+    # ── Top Memory ────────────────────────────────────────────────────────────
+    if top_mem:
+        print()
+        print(rule("Top Memory"))
+        total_ram_mb = (memory['total_gb'] * 1024) if memory else 0
+        for p in top_mem:
+            if p['mem_pct'] < 0.3:
+                break
+            used_mb = p['mem_pct'] / 100 * total_ram_mb
+            color = RED if used_mb >= 2000 else (YELLOW if used_mb >= 800 else DIM)
+            size_str = f"{used_mb/1024:.1f} GB" if used_mb >= 1024 else f"{used_mb:.0f} MB"
+            print(f"  {color}{size_str:>8}{RESET}  {p['name']}")
+
+    # ── Recommendations ───────────────────────────────────────────────────────
+    recs = build_recommendations(battery, memory, top_cpu, top_mem)
+
+    print()
+    print(rule("Recommendations"))
+    if recs:
+        icons = {'critical': f'{RED}●{RESET}', 'warn': f'{YELLOW}●{RESET}', 'info': f'{CYAN}●{RESET}'}
+        for level, msg in recs:
+            icon = icons.get(level, '●')
+            # Wrap long messages
+            if len(msg) > 58:
+                words = msg.split()
+                lines, current = [], []
+                for w in words:
+                    current.append(w)
+                    if len(' '.join(current)) > 56:
+                        lines.append(' '.join(current[:-1]))
+                        current = [w]
+                lines.append(' '.join(current))
+                print(f"  {icon} {lines[0]}")
+                for extra in lines[1:]:
+                    print(f"       {extra}")
+            else:
+                print(f"  {icon} {msg}")
+    else:
+        print(f"  {GREEN}●{RESET} Everything looks good.")
+
+    print()
+
+
+if __name__ == '__main__':
+    main()

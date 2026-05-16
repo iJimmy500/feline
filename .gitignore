@@ -1,0 +1,7 @@
+# Build output
+feline
+dist/
+
+# macOS junk
+.DS_Store
+edit

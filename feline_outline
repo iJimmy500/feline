@@ -1,0 +1,24 @@
+Here are the general tenets of feline tools
+
+Feline tools are a set of tools that are meant to make your mac experience simpler
+
+Here are some of the powerful tools i want to build (+ means complete - means working on)
+
++ snap: provides rec on how to optimize your computers speed and battery usage and suggests apps to close
++ download: allows you to simply download content from the internet such as images, videos and sites themselves from a simple command
++ scrape: helps you scrape sites in a simpler way
+-read: opens given file in a simple and pretty file viewer that is more lightweight than apple preview
++ clean: cleans caches and other things that may be taking unnecessary storage
+-log: captures a log of whatever the user wants a log of
+-noggin: byok ai that helps you out from your terminal with tools that allow it to gain more context from your computer itself
++ context: provides you context (file directory, where the file is mentioned and things like that) for a given file or directory
+-vaccinate: compresses every file within a given directory so that its smaller
++ convert: converts a given file into another file type of the users choice
++ search/browse: a faster version of spotlight search that focuses on apps or files
+-schedule: allows you to schedule any of these commands for a certain time
++ lock: locks a certain app or site for a given time to help you focus more
+-solve: uses ai to solve any issues you may be having (errors, crashes and other issues)
+
+
+
+some of these (like graph and read) will include small and simple popup dialogues or guis that will pop up and then once you clsoe them the command will complete

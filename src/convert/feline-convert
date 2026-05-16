@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BOLD='\033[1m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+usage() {
+    echo -e "${BOLD}feline convert${RESET} — convert a file to a different format"
+    echo ""
+    echo -e "${BOLD}Usage:${RESET}"
+    echo "  feline convert <file> <format>"
+    echo ""
+    echo -e "${BOLD}Examples:${RESET}"
+    echo "  feline convert photo.png jpg"
+    echo "  feline convert clip.mov mp4"
+    echo "  feline convert clip.mp4 gif"
+    echo "  feline convert song.wav mp3"
+    echo "  feline convert notes.md pdf"
+    echo "  feline convert doc.docx pdf"
+    echo ""
+    echo -e "${BOLD}Supported formats by category:${RESET}"
+    echo -e "  ${DIM}Images:${RESET}    png jpg jpeg webp gif bmp tiff ico"
+    echo -e "  ${DIM}Video:${RESET}     mp4 mov avi mkv webm gif"
+    echo -e "  ${DIM}Audio:${RESET}     mp3 wav flac aac m4a ogg opus"
+    echo -e "  ${DIM}Documents:${RESET} pdf docx md html txt epub"
+    echo ""
+    echo -e "${BOLD}Requirements:${RESET}"
+    echo "  brew install ffmpeg imagemagick pandoc"
+    exit 0
+}
+
+die() {
+    echo -e "${RED}Error:${RESET} $1" >&2
+    exit 1
+}
+
+require_cmd() {
+    command -v "$1" &>/dev/null || die "'$1' is required for this conversion. Install with: brew install $2"
+}
+
+# Normalize extension to lowercase, strip leading dot
+ext() {
+    echo "${1##*.}" | tr '[:upper:]' '[:lower:]'
+}
+
+category() {
+    case "$1" in
+        png|jpg|jpeg|webp|bmp|tiff|tif|ico|svg|heic|heif) echo "image" ;;
+        mp4|mov|avi|mkv|webm|flv|wmv|m4v)                  echo "video" ;;
+        mp3|wav|flac|aac|m4a|ogg|opus|wma|aiff)            echo "audio" ;;
+        pdf|docx|doc|md|markdown|html|htm|txt|epub|rst|odt) echo "document" ;;
+        gif) echo "gif" ;; # gif is ambiguous — could come from image or video
+        *) echo "unknown" ;;
+    esac
+}
+
+[[ $# -lt 1 || "$1" == "--help" || "$1" == "-h" ]] && usage
+[[ $# -lt 2 ]] && die "missing target format. Usage: feline convert <file> <format>"
+
+INPUT="$1"
+TARGET_EXT=$(echo "$2" | tr '[:upper:]' '[:lower:]')
+
+[[ -f "$INPUT" ]] || die "file not found: $INPUT"
+
+SRC_EXT=$(ext "$INPUT")
+SRC_CAT=$(category "$SRC_EXT")
+DST_CAT=$(category "$TARGET_EXT")
+
+# Build output filename alongside the input file
+DIR=$(dirname "$INPUT")
+BASE=$(basename "${INPUT%.*}")
+OUTPUT="${DIR}/${BASE}.${TARGET_EXT}"
+
+# Avoid overwriting
+if [[ -f "$OUTPUT" ]]; then
+    N=1
+    while [[ -f "${DIR}/${BASE}_${N}.${TARGET_EXT}" ]]; do (( N++ )); done
+    OUTPUT="${DIR}/${BASE}_${N}.${TARGET_EXT}"
+    echo -e "${YELLOW}Output exists — saving as${RESET} ${BOLD}$(basename "$OUTPUT")${RESET}"
+fi
+
+echo -e "${CYAN}Converting${RESET} ${BOLD}${INPUT}${RESET} → ${BOLD}$(basename "$OUTPUT")${RESET}..."
+
+# ── Image conversions ──────────────────────────────────────────────────────────
+if [[ "$SRC_CAT" == "image" && ( "$DST_CAT" == "image" || "$TARGET_EXT" == "gif" ) ]]; then
+    # Prefer magick (ImageMagick v7), fall back to convert (v6)
+    if command -v magick &>/dev/null; then
+        MAGICK="magick"
+    elif command -v convert &>/dev/null; then
+        MAGICK="convert"
+    else
+        die "'imagemagick' is required. Install with: brew install imagemagick"
+    fi
+    $MAGICK "$INPUT" "$OUTPUT"
+
+# ── Video → gif (special: palette-optimised) ──────────────────────────────────
+elif [[ "$SRC_CAT" == "video" && "$TARGET_EXT" == "gif" ]]; then
+    require_cmd ffmpeg ffmpeg
+    PALETTE=$(mktemp /tmp/feline_palette_XXXXXX.png)
+    trap "rm -f $PALETTE" EXIT
+    # Two-pass: generate palette then apply it for a high-quality gif
+    ffmpeg -loglevel error -i "$INPUT" -vf "fps=15,scale=640:-1:flags=lanczos,palettegen" "$PALETTE"
+    ffmpeg -loglevel error -i "$INPUT" -i "$PALETTE" \
+        -filter_complex "fps=15,scale=640:-1:flags=lanczos[x];[x][1:v]paletteuse" "$OUTPUT"
+
+# ── Video conversions ──────────────────────────────────────────────────────────
+elif [[ "$SRC_CAT" == "video" && "$DST_CAT" == "video" ]]; then
+    require_cmd ffmpeg ffmpeg
+    ffmpeg -loglevel error -stats -i "$INPUT" -c:v libx264 -crf 22 -preset fast \
+        -c:a aac -b:a 192k "$OUTPUT"
+
+# ── Video → audio (extract) ───────────────────────────────────────────────────
+elif [[ "$SRC_CAT" == "video" && "$DST_CAT" == "audio" ]]; then
+    require_cmd ffmpeg ffmpeg
+    ffmpeg -loglevel error -stats -i "$INPUT" -vn -c:a libmp3lame -q:a 2 "$OUTPUT"
+
+# ── Audio conversions ──────────────────────────────────────────────────────────
+elif [[ "$SRC_CAT" == "audio" && "$DST_CAT" == "audio" ]]; then
+    require_cmd ffmpeg ffmpeg
+    ffmpeg -loglevel error -stats -i "$INPUT" "$OUTPUT"
+
+# ── Document conversions ───────────────────────────────────────────────────────
+elif [[ "$SRC_CAT" == "document" && "$DST_CAT" == "document" ]]; then
+    require_cmd pandoc pandoc
+    if [[ "$TARGET_EXT" == "pdf" ]]; then
+        # pandoc needs a pdf engine; try built-in wkhtmltopdf or xelatex
+        if command -v wkhtmltopdf &>/dev/null; then
+            pandoc "$INPUT" -o "$OUTPUT" --pdf-engine=wkhtmltopdf
+        elif command -v xelatex &>/dev/null; then
+            pandoc "$INPUT" -o "$OUTPUT" --pdf-engine=xelatex
+        else
+            pandoc "$INPUT" -o "$OUTPUT" 2>/dev/null || \
+                die "PDF export needs a pdf engine: brew install wkhtmltopdf"
+        fi
+    else
+        pandoc "$INPUT" -o "$OUTPUT"
+    fi
+
+# ── Unsupported combination ────────────────────────────────────────────────────
+else
+    die "don't know how to convert ${SRC_EXT} → ${TARGET_EXT}. Run 'feline convert --help' to see supported formats."
+fi
+
+SIZE=$(du -sh "$OUTPUT" 2>/dev/null | cut -f1)
+echo -e "${GREEN}Done:${RESET} ${BOLD}$(basename "$OUTPUT")${RESET} ${DIM}(${SIZE})${RESET}"

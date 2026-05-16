@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BOLD='\033[1m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+usage() {
+    echo -e "${BOLD}feline search${RESET} — fast file and app search powered by Spotlight"
+    echo ""
+    echo -e "${BOLD}Usage:${RESET}"
+    echo "  feline search <query> [options]"
+    echo ""
+    echo -e "${BOLD}Options:${RESET}"
+    echo "  --apps          Search applications only"
+    echo "  --content       Search inside file contents"
+    echo "  --dir <path>    Limit search to a specific directory"
+    echo "  --type <ext>    Filter by file extension (e.g. pdf, py, mp4)"
+    echo "  --limit <n>     Max results to show (default: 20)"
+    echo ""
+    echo -e "${BOLD}Examples:${RESET}"
+    echo "  feline search \"budget report\""
+    echo "  feline search notes --type md"
+    echo "  feline search xcode --apps"
+    echo "  feline search \"TODO\" --content --dir ~/Projects"
+    exit 0
+}
+
+# File type label + icon mapping
+file_label() {
+    local ext="${1##*.}"
+    ext="${ext,,}"
+    case "$ext" in
+        jpg|jpeg|png|gif|webp|heic|tiff|bmp) echo "image" ;;
+        mp4|mov|avi|mkv|webm|m4v)            echo "video" ;;
+        mp3|wav|flac|aac|m4a|ogg|opus)       echo "audio" ;;
+        pdf)                                  echo "pdf" ;;
+        doc|docx|pages)                       echo "doc" ;;
+        xls|xlsx|numbers|csv)                 echo "sheet" ;;
+        ppt|pptx|key)                         echo "slides" ;;
+        py|js|ts|sh|c|cpp|go|rs|rb|swift|kt) echo "code" ;;
+        md|txt|rtf)                           echo "text" ;;
+        zip|tar|gz|bz2|rar|7z)               echo "archive" ;;
+        app)                                  echo "app" ;;
+        *)                                    echo "file" ;;
+    esac
+}
+
+fmt_size() {
+    local path="$1"
+    local bytes
+    bytes=$(stat -f%z "$path" 2>/dev/null || echo 0)
+    if   (( bytes >= 1073741824 )); then printf "%.1f GB" "$(echo "scale=1; $bytes/1073741824" | bc)"
+    elif (( bytes >= 1048576 ));    then printf "%.1f MB" "$(echo "scale=1; $bytes/1048576" | bc)"
+    elif (( bytes >= 1024 ));       then printf "%.0f KB" "$(echo "scale=0; $bytes/1024" | bc)"
+    else printf "%d B" "$bytes"
+    fi
+}
+
+fmt_date() {
+    stat -f "%Sm" -t "%b %d %Y" "$1" 2>/dev/null || echo ""
+}
+
+# ── Argument parsing ───────────────────────────────────────────────────────────
+QUERY=""
+APPS_ONLY=false
+CONTENT=false
+SEARCH_DIR=""
+TYPE_FILTER=""
+LIMIT=20
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --help|-h)    usage ;;
+        --apps)       APPS_ONLY=true ;;
+        --content)    CONTENT=true ;;
+        --dir)        shift; SEARCH_DIR="$1" ;;
+        --type)       shift; TYPE_FILTER="${1,,}" ;;
+        --limit)      shift; LIMIT="$1" ;;
+        *)            [[ -z "$QUERY" ]] && QUERY="$1" || QUERY="$QUERY $1" ;;
+    esac
+    shift
+done
+
+[[ -z "$QUERY" ]] && { echo -e "${RED}Error:${RESET} no search query given."; echo "Usage: feline search <query> [options]"; exit 1; }
+
+# ── Build mdfind command ───────────────────────────────────────────────────────
+MDFIND_ARGS=()
+
+if $CONTENT; then
+    MDFIND_ARGS+=("$QUERY")
+else
+    MDFIND_ARGS+=("-name" "$QUERY")
+fi
+
+if $APPS_ONLY; then
+    MDFIND_ARGS+=("-onlyin" "/Applications")
+elif [[ -n "$SEARCH_DIR" ]]; then
+    MDFIND_ARGS+=("-onlyin" "$SEARCH_DIR")
+fi
+
+# ── Run search ─────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}search:${RESET} ${CYAN}${QUERY}${RESET}${DIM}$(${APPS_ONLY} && echo '  [apps]')$([[ -n "$TYPE_FILTER" ]] && echo "  [.$TYPE_FILTER]")${RESET}"
+
+mapfile -t RESULTS < <(mdfind "${MDFIND_ARGS[@]}" 2>/dev/null)
+
+# Filter by type if requested
+if [[ -n "$TYPE_FILTER" ]]; then
+    FILTERED=()
+    for r in "${RESULTS[@]}"; do
+        ext="${r##*.}"
+        [[ "${ext,,}" == "$TYPE_FILTER" ]] && FILTERED+=("$r")
+    done
+    RESULTS=("${FILTERED[@]}")
+fi
+
+# Filter out system/hidden paths for cleaner results
+CLEAN=()
+for r in "${RESULTS[@]}"; do
+    [[ "$r" == /System/* ]]          && continue
+    [[ "$r" == /private/var/* ]]     && continue
+    [[ "$r" == /usr/* ]]             && continue
+    [[ "$r" == */.Spotlight-V100/* ]] && continue
+    CLEAN+=("$r")
+done
+RESULTS=("${CLEAN[@]}")
+
+TOTAL=${#RESULTS[@]}
+
+if [[ $TOTAL -eq 0 ]]; then
+    echo -e "${DIM}  No results found.${RESET}"
+    echo ""
+    exit 0
+fi
+
+echo -e "${DIM}  $TOTAL result$([ $TOTAL -ne 1 ] && echo 's') found$([ $TOTAL -gt $LIMIT ] && echo ", showing $LIMIT")${RESET}"
+echo ""
+
+SHOWN=0
+for path in "${RESULTS[@]}"; do
+    [[ $SHOWN -ge $LIMIT ]] && break
+    [[ -e "$path" ]] || continue
+
+    label=$(file_label "$path")
+    size=$(fmt_size "$path")
+    date=$(fmt_date "$path")
+
+    # Shorten home dir
+    display="${path/#$HOME/~}"
+    dir=$(dirname "$display")
+    name=$(basename "$display")
+
+    # Color by type
+    case "$label" in
+        app)     name_color="$CYAN" ;;
+        code)    name_color="$GREEN" ;;
+        image|video|audio) name_color="$YELLOW" ;;
+        *)       name_color="$BOLD" ;;
+    esac
+
+    printf "  %b%-38s%b  %b%-8s%b  %b%s%b\n" \
+        "$name_color" "$name" "$RESET" \
+        "$DIM" "$size" "$RESET" \
+        "$DIM" "$dir" "$RESET"
+
+    SHOWN=$(( SHOWN + 1 ))
+done
+
+if [[ $TOTAL -gt $LIMIT ]]; then
+    echo ""
+    echo -e "  ${DIM}… ${TOTAL - LIMIT} more results. Use --limit to see more.${RESET}"
+fi
+
+echo ""

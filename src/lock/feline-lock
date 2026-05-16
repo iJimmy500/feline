@@ -1,0 +1,611 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BOLD='\033[1m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+HOSTS_FILE="/etc/hosts"
+LOCK_DIR="$HOME/.feline/locks"
+AGENTS_DIR="$HOME/Library/LaunchAgents"
+WATCHDOG_LABEL="com.feline.lock.watchdog"
+MARKER="# feline-lock"
+
+mkdir -p "$LOCK_DIR"
+
+usage() {
+    echo -e "${BOLD}feline lock${RESET} — block distracting sites and apps for a set time"
+    echo ""
+    echo -e "${BOLD}Usage:${RESET}"
+    echo "  feline lock <target> <duration> [--password]"
+    echo "  feline lock --list"
+    echo "  feline lock --unlock <target>"
+    echo "  feline lock --unlock <target> --emergency"
+    echo "  feline lock --unlock-all"
+    echo ""
+    echo -e "${BOLD}Targets:${RESET}"
+    echo "  App name     feline lock Slack 2h"
+    echo "  Site domain  feline lock reddit.com 1h"
+    echo "  Both         feline lock Twitter 30m   (blocks app + site if both exist)"
+    echo ""
+    echo -e "${BOLD}Duration:${RESET}"
+    echo "  30m  /  2h  /  1h30m"
+    echo ""
+    echo -e "${BOLD}Options:${RESET}"
+    echo "  --password    Require a password to unlock"
+    echo "  --emergency   Unlock using your recovery key instead of password"
+    echo ""
+    echo -e "${BOLD}Examples:${RESET}"
+    echo "  feline lock Slack 2h"
+    echo "  feline lock reddit.com 1h --password"
+    echo "  feline lock --unlock Slack"
+    echo "  feline lock --unlock reddit.com --emergency"
+    exit 0
+}
+
+die() { echo -e "${RED}Error:${RESET} $1" >&2; exit 1; }
+
+# ── Duration ───────────────────────────────────────────────────────────────────
+parse_duration() {
+    local input="$1"
+    local h m
+    h=$(echo "$input" | grep -oE '[0-9]+h' | grep -oE '[0-9]+' || true)
+    m=$(echo "$input" | grep -oE '[0-9]+m' | grep -oE '[0-9]+' || true)
+    [[ -z "$h" ]] && h=0
+    [[ -z "$m" ]] && m=0
+    local secs=$(( h * 3600 + m * 60 ))
+    [[ $secs -eq 0 ]] && die "invalid duration '$input' — use formats like 30m, 2h, 1h30m"
+    echo "$secs"
+}
+
+fmt_duration() {
+    local s="$1"
+    local h=$(( s / 3600 )) m=$(( (s % 3600) / 60 ))
+    if   (( h > 0 && m > 0 )); then echo "${h}h ${m}m"
+    elif (( h > 0 ));           then echo "${h}h"
+    else                             echo "${m}m"
+    fi
+}
+
+fmt_remaining() {
+    local expiry="$1" now; now=$(date +%s)
+    local diff=$(( expiry - now ))
+    (( diff <= 0 )) && echo "expired" && return
+    fmt_duration $diff
+}
+
+# ── App finder ─────────────────────────────────────────────────────────────────
+find_app() {
+    local name="$1"
+    for dir in "/Applications" "$HOME/Applications" "/Applications/Setapp"; do
+        [[ -d "$dir/$name.app" ]] && echo "$dir/$name.app" && return
+    done
+    # Case-insensitive fallback
+    find /Applications "$HOME/Applications" -maxdepth 2 -iname "$name.app" -type d 2>/dev/null | head -1
+}
+
+is_domain() {
+    [[ "$1" =~ \. ]] && [[ ! "$1" =~ " " ]]
+}
+
+# ── Lock file helpers ──────────────────────────────────────────────────────────
+# Format: expiry\ntype\ndisplay_name
+write_lock() {
+    local key="$1" expiry="$2" type="$3" display="$4"
+    printf '%s\n%s\n%s\n' "$expiry" "$type" "$display" > "$LOCK_DIR/${key}.lock"
+}
+
+read_lock() {
+    local key="$1" field="$2"
+    local lockfile="$LOCK_DIR/${key}.lock"
+    [[ -f "$lockfile" ]] || return 1
+    case "$field" in
+        expiry)  sed -n '1p' "$lockfile" ;;
+        type)    sed -n '2p' "$lockfile" ;;
+        display) sed -n '3p' "$lockfile" ;;
+    esac
+}
+
+# ── Password helpers ───────────────────────────────────────────────────────────
+hash_str() { printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1; }
+
+gen_recovery_key() {
+    # Format: XXXX-XXXX-XXXX-XXXX
+    cat /dev/urandom | LC_ALL=C tr -dc 'A-Z0-9' | head -c 16 | \
+        sed 's/\(.\{4\}\)\(.\{4\}\)\(.\{4\}\)\(.\{4\}\)/\1-\2-\3-\4/'
+}
+
+set_password() {
+    local key="$1"
+    echo ""
+    while true; do
+        printf "  Set password: "
+        read -rs pass; echo ""
+        [[ -z "$pass" ]] && echo -e "  ${RED}Password cannot be empty.${RESET}" && continue
+        printf "  Confirm:      "
+        read -rs pass2; echo ""
+        [[ "$pass" == "$pass2" ]] && break
+        echo -e "  ${RED}Passwords don't match. Try again.${RESET}"
+    done
+
+    local recovery; recovery=$(gen_recovery_key)
+    hash_str "$pass"     > "$LOCK_DIR/${key}.passwd"
+    hash_str "$recovery" > "$LOCK_DIR/${key}.recovery"
+
+    echo ""
+    echo -e "  ${GREEN}Password set.${RESET}"
+    echo ""
+    echo -e "  ${BOLD}${YELLOW}Recovery key — save this somewhere safe:${RESET}"
+    echo -e "  ${BOLD}${CYAN}  $recovery${RESET}"
+    echo -e "  ${DIM}  You will NOT be shown this again.${RESET}"
+    echo -e "  ${DIM}  Use it with: feline lock --unlock $key --emergency${RESET}"
+    echo ""
+}
+
+check_password() {
+    local key="$1"
+    local hash_file="$LOCK_DIR/${key}.passwd"
+    [[ -f "$hash_file" ]] || return 0  # no password set
+
+    printf "  Password: "
+    read -rs input; echo ""
+    local input_hash; input_hash=$(hash_str "$input")
+    local stored; stored=$(cat "$hash_file")
+
+    if [[ "$input_hash" != "$stored" ]]; then
+        echo -e "  ${RED}Incorrect password.${RESET}"
+        return 1
+    fi
+    return 0
+}
+
+check_recovery() {
+    local key="$1"
+    local hash_file="$LOCK_DIR/${key}.recovery"
+    [[ -f "$hash_file" ]] || { echo -e "  ${DIM}No recovery key set for this lock.${RESET}"; return 1; }
+
+    echo ""
+    echo -e "  ${YELLOW}Emergency override — enter your recovery key:${RESET}"
+    printf "  Recovery key: "
+    read -r input; echo ""
+    # Normalize: strip spaces and dashes, uppercase
+    input=$(echo "$input" | tr '[:lower:]' '[:upper:]' | tr -d ' -')
+    # Reconstruct expected format for hashing
+    local formatted="${input:0:4}-${input:4:4}-${input:8:4}-${input:12:4}"
+    local input_hash; input_hash=$(hash_str "$formatted")
+    local stored; stored=$(cat "$hash_file")
+
+    if [[ "$input_hash" != "$stored" ]]; then
+        echo -e "  ${RED}Incorrect recovery key.${RESET}"
+        return 1
+    fi
+    return 0
+}
+
+# ── Input validation ───────────────────────────────────────────────────────────
+# Strict whitelist — protects against shell/AppleScript injection downstream.
+validate_domain() {
+    local d="$1"
+    [[ "$d" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]] && [[ ${#d} -le 253 ]]
+}
+
+validate_app_name() {
+    # Allow letters, digits, spaces, and a few common punctuation chars used in app names
+    local a="$1"
+    [[ "$a" =~ ^[A-Za-z0-9][A-Za-z0-9\ ._+\&\'-]{0,63}$ ]]
+}
+
+# ── Hosts file ─────────────────────────────────────────────────────────────────
+# Uses `sudo tee -a` with the line passed via stdin — no shell interpretation
+# of the domain occurs in the privileged context. The domain is also pre-validated.
+hosts_add() {
+    local domain="$1"
+    validate_domain "$domain" || die "invalid domain: $(printf '%q' "$domain")"
+
+    local line="127.0.0.1  $domain  $MARKER"
+    printf '%s\n' "$line" | sudo tee -a "$HOSTS_FILE" >/dev/null
+
+    if ! grep -qF "127.0.0.1  www.$domain  $MARKER" "$HOSTS_FILE" 2>/dev/null; then
+        printf '%s\n' "127.0.0.1  www.$domain  $MARKER" | sudo tee -a "$HOSTS_FILE" >/dev/null
+    fi
+    sudo dscacheutil -flushcache 2>/dev/null || true
+    sudo killall -HUP mDNSResponder 2>/dev/null || true
+}
+
+# Reads /etc/hosts, removes any feline-lock lines matching the validated domain,
+# and writes back via `sudo tee` — never passes user input to a shell.
+hosts_remove() {
+    local domain="$1"
+    validate_domain "$domain" || return 0  # bad domain → nothing safe to remove
+
+    local tmp; tmp=$(mktemp /tmp/feline_hosts_XXXXXX)
+    # Use fixed-string matching with awk, no regex interpretation of $domain
+    awk -v d="  $domain  " -v dw="  www.$domain  " -v m="$MARKER" '
+        !(index($0, d) > 0 && index($0, m) > 0) &&
+        !(index($0, dw) > 0 && index($0, m) > 0)
+    ' "$HOSTS_FILE" > "$tmp"
+
+    sudo tee "$HOSTS_FILE" < "$tmp" >/dev/null
+    rm -f "$tmp"
+    sudo dscacheutil -flushcache 2>/dev/null || true
+    sudo killall -HUP mDNSResponder 2>/dev/null || true
+}
+
+# ── Watchdog ───────────────────────────────────────────────────────────────────
+WATCHDOG_SCRIPT="$HOME/.feline/lock-watchdog.sh"
+
+install_watchdog() {
+    # Write the watchdog script.
+    # Note: display names are pre-validated by validate_app_name() before being
+    # written to lockfiles, so AppleScript "..." interpolation here is safe
+    # (no quotes, backslashes, or $-signs can appear in a validated app name).
+    cat > "$WATCHDOG_SCRIPT" <<'WATCHDOG'
+#!/usr/bin/env bash
+LOCK_DIR="$HOME/.feline/locks"
+now=$(date +%s)
+
+for lockfile in "$LOCK_DIR"/*.lock; do
+    [[ -f "$lockfile" ]] || continue
+    expiry=$(sed -n '1p' "$lockfile")
+    type=$(sed -n '2p' "$lockfile")
+    display=$(sed -n '3p' "$lockfile")
+    (( now >= expiry )) && continue
+    [[ "$type" != "app" && "$type" != "both" ]] && continue
+
+    # Defense in depth: re-validate display before passing to AppleScript.
+    [[ "$display" =~ ^[A-Za-z0-9][A-Za-z0-9\ ._+\&\'-]{0,63}$ ]] || continue
+
+    unlock_time=$(date -r "$expiry" "+%I:%M %p")
+
+    osascript 2>/dev/null <<APPLESCRIPT
+tell application "System Events"
+    if exists process "$display" then
+        if visible of process "$display" is true then
+            tell application "$display" to hide
+            display notification "$display is locked until $unlock_time" with title "feline lock"
+        end if
+    end if
+end tell
+APPLESCRIPT
+done
+WATCHDOG
+    chmod +x "$WATCHDOG_SCRIPT"
+
+    # Install LaunchAgent if not already running
+    local plist="$AGENTS_DIR/$WATCHDOG_LABEL.plist"
+    if [[ ! -f "$plist" ]]; then
+        cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${WATCHDOG_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${WATCHDOG_SCRIPT}</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>4</integer>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+        launchctl load "$plist" 2>/dev/null || true
+    fi
+}
+
+uninstall_watchdog() {
+    # Only remove watchdog if no app locks remain
+    local has_app=false
+    for lockfile in "$LOCK_DIR"/*.lock; do
+        [[ -f "$lockfile" ]] || continue
+        local type; type=$(sed -n '2p' "$lockfile")
+        [[ "$type" == "app" || "$type" == "both" ]] && has_app=true && break
+    done
+    $has_app && return
+
+    local plist="$AGENTS_DIR/$WATCHDOG_LABEL.plist"
+    launchctl unload "$plist" 2>/dev/null || true
+    rm -f "$plist" "$WATCHDOG_SCRIPT"
+}
+
+# ── Unlock scheduler ───────────────────────────────────────────────────────────
+schedule_unlock() {
+    local key="$1" expiry="$2"
+    local label="com.feline.lock.expire.$key"
+    local plist="$AGENTS_DIR/$label.plist"
+    local feline_lock; feline_lock=$(command -v feline-lock)
+
+    local yr mo dy hr mn
+    yr=$(date -r "$expiry" +%Y); mo=$(date -r "$expiry" +%-m)
+    dy=$(date -r "$expiry" +%-d); hr=$(date -r "$expiry" +%-H)
+    mn=$(date -r "$expiry" +%-M)
+
+    cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>${label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${feline_lock}</string>
+        <string>--unlock-expired</string>
+        <string>${key}</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Year</key>  <integer>${yr}</integer>
+        <key>Month</key> <integer>${mo}</integer>
+        <key>Day</key>   <integer>${dy}</integer>
+        <key>Hour</key>  <integer>${hr}</integer>
+        <key>Minute</key><integer>${mn}</integer>
+    </dict>
+    <key>RunAtLoad</key><false/>
+</dict>
+</plist>
+PLIST
+    launchctl load "$plist" 2>/dev/null || true
+}
+
+remove_expire_agent() {
+    local key="$1"
+    local label="com.feline.lock.expire.$key"
+    local plist="$AGENTS_DIR/$label.plist"
+    launchctl unload "$plist" 2>/dev/null || true
+    rm -f "$plist"
+}
+
+# ── Cleanup expired ────────────────────────────────────────────────────────────
+cleanup_expired() {
+    local now; now=$(date +%s)
+    for lockfile in "$LOCK_DIR"/*.lock; do
+        [[ -f "$lockfile" ]] || continue
+        local expiry; expiry=$(sed -n '1p' "$lockfile")
+        (( now < expiry )) && continue
+        local key; key=$(basename "$lockfile" .lock)
+        _do_unlock "$key" silent
+    done
+}
+
+# ── Core unlock (internal) ─────────────────────────────────────────────────────
+_do_unlock() {
+    local key="$1" mode="${2:-}"
+    local type; type=$(read_lock "$key" type || echo "site")
+    local display; display=$(read_lock "$key" display || echo "$key")
+
+    case "$type" in
+        site|both)
+            hosts_remove "$display" 2>/dev/null || true ;;
+    esac
+
+    remove_expire_agent "$key"
+    rm -f "$LOCK_DIR/${key}.lock" "$LOCK_DIR/${key}.passwd" "$LOCK_DIR/${key}.recovery"
+
+    [[ "$mode" != "silent" ]] && echo -e "  ${GREEN}✓${RESET} ${BOLD}$display${RESET} unlocked"
+
+    uninstall_watchdog
+}
+
+# ── Commands ───────────────────────────────────────────────────────────────────
+
+cmd_lock() {
+    local target="$1" duration="$2" use_password="${3:-false}"
+    local seconds; seconds=$(parse_duration "$duration")
+    local now; now=$(date +%s)
+    local expiry=$(( now + seconds ))
+
+    # Determine lock type
+    local app_path="" lock_type="" display="$target"
+    app_path=$(find_app "$target" || true)
+
+    if [[ -n "$app_path" ]] && is_domain "$target"; then
+        lock_type="both"
+        validate_domain "$target" || die "invalid domain: $target"
+    elif [[ -n "$app_path" ]]; then
+        lock_type="app"
+        display=$(basename "$app_path" .app)
+        validate_app_name "$display" || die "app name contains unsupported characters: $display"
+    elif is_domain "$target"; then
+        lock_type="site"
+        display="$target"
+        validate_domain "$display" || die "invalid domain: $display"
+    else
+        die "could not find an app or site matching '$target'"
+    fi
+
+    # Safe key for filenames — only alphanumerics and underscore
+    local key; key=$(echo "$display" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '_' | sed 's/__*/_/g; s/^_//; s/_$//')
+    [[ -z "$key" ]] && die "could not derive a safe filename key from '$display'"
+
+    # Already locked?
+    if [[ -f "$LOCK_DIR/${key}.lock" ]]; then
+        local existing; existing=$(read_lock "$key" expiry)
+        echo -e "${YELLOW}Already locked:${RESET} $display ${DIM}($(fmt_remaining "$existing") remaining)${RESET}"
+        echo -n -e "Replace with new ${BOLD}$(fmt_duration $seconds)${RESET} lock? [y/n]: "
+        read -r ans
+        [[ "$ans" =~ ^[Yy]$ ]] || { echo -e "${DIM}Cancelled.${RESET}"; exit 0; }
+        _do_unlock "$key" silent
+    fi
+
+    echo ""
+    echo -e "${CYAN}Locking${RESET} ${BOLD}$display${RESET} for ${BOLD}$(fmt_duration $seconds)${RESET}..."
+
+    # Apply lock
+    case "$lock_type" in
+        site)
+            echo -e "${DIM}(sudo required to edit /etc/hosts)${RESET}"
+            hosts_add "$display"
+            ;;
+        app)
+            install_watchdog
+            ;;
+        both)
+            echo -e "${DIM}Found both app and site — blocking both.${RESET}"
+            echo -e "${DIM}(sudo required to edit /etc/hosts)${RESET}"
+            hosts_add "$display"
+            install_watchdog
+            ;;
+    esac
+
+    write_lock "$key" "$expiry" "$lock_type" "$display"
+    schedule_unlock "$key" "$expiry"
+
+    # Password?
+    if $use_password; then
+        set_password "$key"
+    fi
+
+    local unlock_time; unlock_time=$(date -r "$expiry" "+%I:%M %p")
+    echo ""
+    echo -e "  ${GREEN}✓${RESET} ${BOLD}$display${RESET} is locked"
+    echo -e "  ${DIM}Auto-unlocks at ${unlock_time}${RESET}"
+    [[ -f "$LOCK_DIR/${key}.passwd" ]] && \
+        echo -e "  ${DIM}Password required to unlock early${RESET}"
+    echo ""
+}
+
+cmd_unlock() {
+    local target="$1" emergency="${2:-false}"
+    local key; key=$(echo "$target" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '_' | sed 's/__*/_/g; s/^_//; s/_$//')
+
+    # Try with and without app name normalization
+    if [[ ! -f "$LOCK_DIR/${key}.lock" ]]; then
+        # Try finding by display name
+        local found=""
+        for lf in "$LOCK_DIR"/*.lock; do
+            [[ -f "$lf" ]] || continue
+            local d; d=$(sed -n '3p' "$lf")
+            if [[ "${d,,}" == "${target,,}" ]]; then
+                found=$(basename "$lf" .lock)
+                break
+            fi
+        done
+        [[ -z "$found" ]] && die "'$target' is not currently locked"
+        key="$found"
+    fi
+
+    local display; display=$(read_lock "$key" display || echo "$target")
+
+    # Password check
+    if [[ -f "$LOCK_DIR/${key}.passwd" ]]; then
+        echo ""
+        if $emergency; then
+            check_recovery "$key" || exit 1
+        else
+            echo -e "  ${BOLD}$display${RESET} is password protected."
+            local attempts=0
+            while (( attempts < 3 )); do
+                check_password "$key" && break
+                attempts=$(( attempts + 1 ))
+                (( attempts < 3 )) && echo -e "  ${DIM}$((3 - attempts)) attempt(s) remaining.${RESET}"
+            done
+            if (( attempts == 3 )); then
+                echo ""
+                echo -e "  ${RED}Too many failed attempts.${RESET}"
+                echo -e "  ${DIM}Use --emergency with your recovery key to override.${RESET}"
+                echo ""
+                exit 1
+            fi
+        fi
+    fi
+
+    echo ""
+    _do_unlock "$key"
+    echo ""
+}
+
+cmd_unlock_expired() {
+    local key="$1"
+    [[ -f "$LOCK_DIR/${key}.lock" ]] || exit 0
+
+    local type; type=$(read_lock "$key" type 2>/dev/null || echo site)
+    local display; display=$(read_lock "$key" display 2>/dev/null || echo "$key")
+
+    # Re-validate before passing to AppleScript notification
+    [[ "$display" =~ ^[A-Za-z0-9][A-Za-z0-9\ ._+\&\'\.\-]{0,255}$ ]] || display="$key"
+
+    if [[ "$type" == "site" || "$type" == "both" ]]; then
+        # Site unlock needs sudo (modifies /etc/hosts) which launchd can't provide
+        # non-interactively. We notify the user instead — they can finalize with
+        # `feline lock --unlock <site>` which will prompt for sudo properly.
+        osascript -e "display notification \"$display lock expired — run 'feline lock --unlock $display' to restore\" with title \"feline lock\"" 2>/dev/null || true
+    else
+        # App-only locks don't need sudo — clean up directly
+        _do_unlock "$key" silent
+        osascript -e "display notification \"$display is now unlocked\" with title \"feline lock\"" 2>/dev/null || true
+    fi
+}
+
+cmd_unlock_all() {
+    local found=0
+    for lockfile in "$LOCK_DIR"/*.lock; do
+        [[ -f "$lockfile" ]] || continue
+        local key; key=$(basename "$lockfile" .lock)
+        if [[ -f "$LOCK_DIR/${key}.passwd" ]]; then
+            local display; display=$(sed -n '3p' "$lockfile")
+            echo -e "  ${DIM}Skipping ${display} — password protected${RESET}"
+            continue
+        fi
+        _do_unlock "$key"
+        found=$(( found + 1 ))
+    done
+    (( found == 0 )) && echo -e "${DIM}No unlockable locks found.${RESET}"
+    echo ""
+}
+
+cmd_list() {
+    cleanup_expired
+    echo ""
+    echo -e "${BOLD}Active locks${RESET}"
+    echo -e "${DIM}────────────────────────────────────────────────${RESET}"
+
+    local found=0
+    for lockfile in "$LOCK_DIR"/*.lock; do
+        [[ -f "$lockfile" ]] || continue
+        local key; key=$(basename "$lockfile" .lock)
+        local expiry; expiry=$(read_lock "$key" expiry)
+        local type;   type=$(read_lock "$key" type)
+        local display; display=$(read_lock "$key" display)
+        local remaining; remaining=$(fmt_remaining "$expiry")
+        local unlock_time; unlock_time=$(date -r "$expiry" "+%b %d  %I:%M %p")
+        local pw_icon=""; [[ -f "$LOCK_DIR/${key}.passwd" ]] && pw_icon=" ${DIM}🔑${RESET}"
+
+        printf "  ${BOLD}%-24s${RESET}${DIM}%-8s${RESET}  ${YELLOW}%s${RESET}${DIM}  until %s${RESET}%b\n" \
+            "$display" "[$type]" "$remaining" "$unlock_time" "$pw_icon"
+        found=$(( found + 1 ))
+    done
+
+    (( found == 0 )) && echo -e "  ${DIM}No active locks.${RESET}"
+    echo ""
+}
+
+# ── Entry ──────────────────────────────────────────────────────────────────────
+[[ $# -eq 0 ]] && usage
+cleanup_expired
+
+case "$1" in
+    --help|-h)        usage ;;
+    --list|-l)        cmd_list ;;
+    --unlock)
+        [[ $# -lt 2 ]] && die "usage: feline lock --unlock <target>"
+        EMERGENCY=false
+        [[ "${3:-}" == "--emergency" ]] && EMERGENCY=true
+        cmd_unlock "$2" $EMERGENCY
+        ;;
+    --unlock-all)     cmd_unlock_all ;;
+    --unlock-expired) cmd_unlock_expired "${2:-}" ;;  # internal, called by LaunchAgent
+    *)
+        [[ $# -lt 2 ]] && die "usage: feline lock <target> <duration>"
+        USE_PW=false
+        [[ "${3:-}" == "--password" ]] && USE_PW=true
+        cmd_lock "$1" "$2" $USE_PW
+        ;;
+esac

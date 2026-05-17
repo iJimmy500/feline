@@ -13,6 +13,7 @@ feline snap       system snapshot with battery / memory / performance tips
 feline search     fast file and app search (powered by Spotlight)
 feline scrape     pull text, links, or images from any webpage
 feline lock       block distracting sites and apps for a set time
+feline update     check for and install the latest version
 ```
 
 ## Why feline?
@@ -27,7 +28,7 @@ feline lock       block distracting sites and apps for a set time
 ## Install
 
 ```bash
-git clone <repo> feline
+git clone https://github.com/iJimmy500/feline
 cd feline
 ./install.sh
 ```
@@ -181,6 +182,16 @@ feline lock --unlock reddit.com --emergency    # use recovery key
 
 Duration: `30m`, `2h`, `1h30m`. Locks auto-clean on expiry.
 
+### `feline update`
+
+Check for and install the latest version of feline. feline also silently
+checks for updates once per day in the background — if a new version is
+available, a one-line nudge appears the next time you run any command.
+
+```bash
+feline update
+```
+
 ## Optional dependencies
 
 These are needed only for certain commands. The installer offers to set
@@ -240,3 +251,4 @@ The dispatcher works exactly like `git` does — `feline foo bar` exec's
 ## License
 
 MIT
+

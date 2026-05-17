@@ -9,7 +9,7 @@ CYAN='\033[0;36m'
 DIM='\033[2m'
 RESET='\033[0m'
 
-VERSION="1.0.0"
+VERSION=$(cat "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/VERSION" 2>/dev/null || echo "1.0.0")
 PREFIX="${PREFIX:-/usr/local}"
 BINDIR="$PREFIX/bin"
 
@@ -22,6 +22,8 @@ SCRIPTS=(
     feline-search
     feline-scrape
     feline-lock
+    feline-update
+    feline-update-check
 )
 
 print_done() {
@@ -54,7 +56,7 @@ elif [[ -f "$SCRIPT_DIR/src/feline.c" ]]; then
     RELEASE_MODE=false
 else
     echo -e "${RED}Error:${RESET} Could not find feline source or pre-built binary." >&2
-    echo -e "${DIM}Re-download the release package from https://github.com/USER/feline/releases${RESET}" >&2
+    echo -e "${DIM}Re-download the release package from https://github.com/iJimmy500/feline/releases${RESET}" >&2
     exit 1
 fi
 
@@ -110,12 +112,11 @@ echo -e "${CYAN}Installing scripts...${RESET}"
 
 for name in "${SCRIPTS[@]}"; do
     # Scripts live alongside this install.sh in release mode,
-    # or under src/<subdir>/ in source mode.
+    # or somewhere under src/ in source mode.
     if $RELEASE_MODE; then
         src_path="$SCRIPT_DIR/$name"
     else
-        subdir="${name#feline-}"
-        src_path="$SCRIPT_DIR/src/$subdir/$name"
+        src_path=$(find "$SCRIPT_DIR/src" -name "$name" -type f 2>/dev/null | head -1)
     fi
 
     if [[ ! -f "$src_path" ]]; then

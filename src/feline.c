@@ -2,14 +2,55 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <time.h>
 
-#define MAX_CMD 256
+#define MAX_CMD  256
+#define MAX_PATH 512
+
+#define UPDATE_INTERVAL 86400  /* 1 day in seconds */
 
 static const char *COMMANDS[] = {
     "download", "convert", "clean", "context",
-    "snap", "search", "scrape", "lock",
+    "snap", "search", "scrape", "lock", "update",
     NULL
 };
+
+static void maybe_notify_update(void) {
+    const char *home = getenv("HOME");
+    if (!home) return;
+    char flag[MAX_PATH];
+    snprintf(flag, sizeof(flag), "%s/.feline/update_available", home);
+    if (access(flag, F_OK) == 0) {
+        fprintf(stderr, "\033[33mA feline update is available. Run 'feline update' to install it.\033[0m\n");
+    }
+}
+
+static void maybe_spawn_checker(void) {
+    const char *home = getenv("HOME");
+    if (!home) return;
+    char stamp[MAX_PATH];
+    snprintf(stamp, sizeof(stamp), "%s/.feline/last_update_check", home);
+
+    struct stat st;
+    if (stat(stamp, &st) == 0 && difftime(time(NULL), st.st_mtime) < UPDATE_INTERVAL)
+        return;
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        execlp("feline-update-check", "feline-update-check", NULL);
+        _exit(1);
+    }
+}
 
 static void print_usage(void) {
     fprintf(stderr, "Usage: feline <command> [args]\n\n");
@@ -34,6 +75,9 @@ int main(int argc, char *argv[]) {
         printf("feline 1.0.0\n");
         return 0;
     }
+
+    maybe_notify_update();
+    maybe_spawn_checker();
 
     char cmd[MAX_CMD];
     if (snprintf(cmd, sizeof(cmd), "feline-%s", argv[1]) >= (int)sizeof(cmd)) {

@@ -19,7 +19,7 @@ RESET='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-VERSION="1.0.0"
+VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "1.0.0")
 NAME="feline-${VERSION}-macos"
 DIST="$SCRIPT_DIR/dist"
 STAGING="$DIST/$NAME"
@@ -33,6 +33,8 @@ SCRIPTS=(
     search/feline-search
     scrape/feline-scrape
     lock/feline-lock
+    update/feline-update
+    update/feline-update-check
 )
 
 # ── Sanity checks ──────────────────────────────────────────────────────────────

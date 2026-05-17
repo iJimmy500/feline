@@ -2,7 +2,7 @@
 # feline installer — fetches the latest release and runs install.sh
 #
 # Usage (one-liner):
-#   curl -fsSL https://raw.githubusercontent.com/USER/feline/main/get.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/iJimmy500/feline/main/get.sh | bash
 
 set -euo pipefail
 

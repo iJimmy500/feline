@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Background update checker — run silently by the feline dispatcher once per day.
+# Writes ~/.feline/update_available if a newer release exists on GitHub.
+
+set -euo pipefail
+
+REPO="iJimmy500/feline"
+FELINE_DIR="$HOME/.feline"
+STAMP="$FELINE_DIR/last_update_check"
+FLAG="$FELINE_DIR/update_available"
+
+mkdir -p "$FELINE_DIR"
+
+# Always update the timestamp so we don't spin every run on network failure.
+touch "$STAMP"
+
+CURRENT=$(feline --version 2>/dev/null | awk '{print $2}')
+[[ -z "$CURRENT" ]] && exit 0
+
+LATEST=$(curl -fsSL --max-time 5 \
+    "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
+    | grep '"tag_name"' \
+    | sed 's/.*"v\([^"]*\)".*/\1/')
+
+[[ -z "$LATEST" ]] && exit 0
+
+if [[ "$LATEST" != "$CURRENT" ]]; then
+    echo "$LATEST" > "$FLAG"
+else
+    rm -f "$FLAG"
+fi

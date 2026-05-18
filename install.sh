@@ -6,6 +6,7 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
+PURPLE='\033[0;35m'
 DIM='\033[2m'
 RESET='\033[0m'
 
@@ -22,19 +23,27 @@ SCRIPTS=(
     feline-search
     feline-scrape
     feline-lock
+    feline-settings
+    feline-ports
+    feline-schedule
     feline-update
     feline-update-check
+    feline-meow
 )
 
 print_done() {
     echo ""
-    echo -e "${GREEN}${BOLD}feline $VERSION is installed.${RESET}"
+    echo -e "${PURPLE}${BOLD}feline${RESET}${BOLD} $VERSION is installed.${RESET}"
     echo -e "Run ${CYAN}feline --help${RESET} to get started."
     echo ""
 }
 
 echo ""
-echo -e "${BOLD}feline installer${RESET}  ${DIM}v${VERSION}${RESET}"
+echo -e "${PURPLE}${BOLD}feline${RESET}${BOLD} installer${RESET}  ${DIM}v${VERSION}${RESET}"
+echo ""
+echo -e "${YELLOW}${BOLD}⚠  Experimental software${RESET}"
+echo -e "${YELLOW}   feline is under active development. Features may change or break"
+echo -e "   without notice. Use at your own risk.${RESET}"
 echo ""
 
 # ── Detect macOS ───────────────────────────────────────────────────────────────

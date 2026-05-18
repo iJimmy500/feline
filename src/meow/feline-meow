@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+RESPONSES=(
+    "Mrrrow!"
+    "Purrr..."
+    "Mew!"
+    "Meow~"
+    "*chirp*"
+    "Mraow!"
+    "Nyaa~"
+    "*slow blink*"
+    "Prrrp?"
+)
+
+CATS=(
+'  /\_/\
+ ( =^.^= )
+  )     (
+ (__ __ __)  '
+
+'  /\   /\
+ (  o   o  )
+ (  =^=  )
+  )_____(__  '
+
+'   /\__/\
+  ( >^.^< )
+   \  Y  /
+    `---`   '
+
+'  .---.
+ /   o o \
+ \ =^_^= /
+  `-----`   '
+)
+
+cat_idx=$(( RANDOM % ${#CATS[@]} ))
+resp_idx=$(( RANDOM % ${#RESPONSES[@]} ))
+
+echo ""
+printf "${PURPLE}%s${RESET}\n" "${CATS[$cat_idx]}"
+echo -e "  ${BOLD}${CYAN}${RESPONSES[$resp_idx]}${RESET}"
+echo ""

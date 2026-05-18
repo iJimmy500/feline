@@ -15,6 +15,7 @@
 static const char *COMMANDS[] = {
     "download", "convert", "clean", "context",
     "snap", "search", "scrape", "lock", "update",
+    "settings", "ports", "schedule",
     NULL
 };
 
@@ -58,6 +59,7 @@ static void print_usage(void) {
     for (int i = 0; COMMANDS[i]; i++)
         fprintf(stderr, "  %s\n", COMMANDS[i]);
     fprintf(stderr, "\nRun 'feline <command> --help' for usage on a specific command.\n");
+    fprintf(stderr, "Run 'feline --credits' for license and author information.\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -73,6 +75,18 @@ int main(int argc, char *argv[]) {
 
     if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0) {
         printf("feline 1.1.0\n");
+        return 0;
+    }
+
+    if (strcmp(argv[1], "--credits") == 0) {
+        printf("feline 1.1.0  (experimental)\n");
+        printf("Copyright (c) 2026 james006\n");
+        printf("\n");
+        printf("Licensed under the feline Community License v1.0\n");
+        printf("https://github.com/iJimmy500/feline\n");
+        printf("\n");
+        printf("WARNING: This software is experimental. Features may change\n");
+        printf("or break without notice. Use at your own risk.\n");
         return 0;
     }
 

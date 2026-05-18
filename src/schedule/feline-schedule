@@ -1,0 +1,341 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BOLD='\033[1m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+SCHEDULE_DIR="$HOME/.feline/schedules"
+AGENTS_DIR="$HOME/Library/LaunchAgents"
+LABEL_PREFIX="com.feline.schedule"
+
+mkdir -p "$SCHEDULE_DIR" "$AGENTS_DIR"
+
+usage() {
+    echo -e "${BOLD}feline schedule${RESET} — run feline commands at a set time"
+    echo ""
+    echo -e "${BOLD}Usage:${RESET}"
+    echo "  feline schedule <time> <command> [args]        one-time run"
+    echo "  feline schedule <time> <command> [args] --daily    repeat every day"
+    echo "  feline schedule <time> <command> [args] --weekly   repeat every week"
+    echo "  feline schedule list                           show scheduled tasks"
+    echo "  feline schedule remove <id>                    remove a task"
+    echo ""
+    echo -e "${BOLD}Time formats:${RESET}"
+    echo "  9pm        21:00 today (tomorrow if already past)"
+    echo "  9:30am     09:30 today"
+    echo "  14:30      24-hour format"
+    echo "  in 30m     30 minutes from now"
+    echo "  in 2h      2 hours from now"
+    echo ""
+    echo -e "${BOLD}Examples:${RESET}"
+    echo "  feline schedule 9pm clean"
+    echo "  feline schedule 8am snap --daily"
+    echo "  feline schedule in 30m download https://example.com/file.zip"
+    echo "  feline schedule list"
+    echo "  feline schedule remove abc123"
+    exit 0
+}
+
+die() { echo -e "${RED}Error:${RESET} $1" >&2; exit 1; }
+
+# ── Time parser ────────────────────────────────────────────────────────────────
+# Outputs: HOUR MINUTE DELAY_SECS (delay only used for "in Xm/Xh" forms)
+parse_time() {
+    local raw="$1"
+    local hour minute
+
+    # "in 30m" or "in 2h"
+    if [[ "$raw" == "in" ]]; then
+        local val="${2:-}"
+        [[ -z "$val" ]] && die "expected duration after 'in' (e.g. in 30m, in 2h)"
+        if [[ "$val" =~ ^([0-9]+)m$ ]]; then
+            PARSED_DELAY=$(( ${BASH_REMATCH[1]} * 60 ))
+            PARSED_HOUR=""
+            PARSED_MIN=""
+            return
+        elif [[ "$val" =~ ^([0-9]+)h$ ]]; then
+            PARSED_DELAY=$(( ${BASH_REMATCH[1]} * 3600 ))
+            PARSED_HOUR=""
+            PARSED_MIN=""
+            return
+        else
+            die "unknown duration format '$val'. Use 30m or 2h."
+        fi
+    fi
+
+    PARSED_DELAY=""
+
+    # 12h: 9pm, 9:30am, 11:45pm
+    if [[ "$raw" =~ ^([0-9]{1,2})(:([0-9]{2}))?([ap]m)$ ]]; then
+        hour="${BASH_REMATCH[1]}"
+        minute="${BASH_REMATCH[3]:-0}"
+        local ampm="${BASH_REMATCH[4]}"
+        hour=$(( 10#$hour ))
+        minute=$(( 10#$minute ))
+        if [[ "$ampm" == "pm" && $hour -ne 12 ]]; then hour=$(( hour + 12 )); fi
+        if [[ "$ampm" == "am" && $hour -eq 12 ]]; then hour=0; fi
+    # 24h: 14:30 or 9:00
+    elif [[ "$raw" =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
+        hour=$(( 10#${BASH_REMATCH[1]} ))
+        minute=$(( 10#${BASH_REMATCH[2]} ))
+    else
+        die "unrecognised time '$raw'. See 'feline schedule --help' for formats."
+    fi
+
+    [[ $hour -lt 0 || $hour -gt 23 ]] && die "hour out of range: $hour"
+    [[ $minute -lt 0 || $minute -gt 59 ]] && die "minute out of range: $minute"
+
+    PARSED_HOUR=$hour
+    PARSED_MIN=$minute
+}
+
+# ── Short unique ID ────────────────────────────────────────────────────────────
+make_id() {
+    LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | head -c 6
+}
+
+# ── Write LaunchAgent plist ────────────────────────────────────────────────────
+write_plist() {
+    local label="$1" wrapper="$2" hour="$3" min="$4" repeat="$5"
+    local plist="$AGENTS_DIR/${label}.plist"
+
+    if [[ -n "$hour" ]]; then
+        # Calendar-based trigger
+        local weekday_block=""
+        [[ "$repeat" == "weekly" ]] && weekday_block="
+        <key>Weekday</key>
+        <integer>$(date +%u)</integer>"
+
+        cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${wrapper}</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>${hour}</integer>
+        <key>Minute</key>
+        <integer>${min}</integer>${weekday_block}
+    </dict>
+    <key>StandardOutPath</key>
+    <string>${SCHEDULE_DIR}/${label##*.}.log</string>
+    <key>StandardErrorPath</key>
+    <string>${SCHEDULE_DIR}/${label##*.}.log</string>
+</dict>
+</plist>
+PLIST
+    else
+        # Delay-based: fire once after N seconds using StartInterval
+        # (launchd doesn't have a "run once at T+N" natively, so we use
+        # StartInterval=delay and have the wrapper unload itself immediately)
+        cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${wrapper}</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>${PARSED_DELAY}</integer>
+    <key>StandardOutPath</key>
+    <string>${SCHEDULE_DIR}/${label##*.}.log</string>
+    <key>StandardErrorPath</key>
+    <string>${SCHEDULE_DIR}/${label##*.}.log</string>
+</dict>
+</plist>
+PLIST
+    fi
+}
+
+# ── Write wrapper script ───────────────────────────────────────────────────────
+write_wrapper() {
+    local wrapper="$1" label="$2" plist="$3" repeat="$4"
+    shift 4
+    local feline_args=("$@")
+
+    # Build feline command string safely
+    local cmd_str="feline"
+    for arg in "${feline_args[@]}"; do
+        cmd_str+=" $(printf '%q' "$arg")"
+    done
+
+    local cleanup=""
+    if [[ "$repeat" == "once" ]]; then
+        cleanup="launchctl unload \"${plist}\" 2>/dev/null; rm -f \"${plist}\" \"${wrapper}\""
+    fi
+
+    cat > "$wrapper" <<WRAPPER
+#!/usr/bin/env bash
+export PATH="/usr/local/bin:/opt/homebrew/bin:\$PATH"
+${cmd_str}
+${cleanup}
+WRAPPER
+    chmod 755 "$wrapper"
+}
+
+# ── Save metadata ──────────────────────────────────────────────────────────────
+save_meta() {
+    local id="$1" label="$2" repeat="$3" time_desc="$4"
+    shift 4
+    local meta="$SCHEDULE_DIR/${id}.meta"
+    {
+        echo "id=${id}"
+        echo "label=${label}"
+        echo "repeat=${repeat}"
+        echo "time=${time_desc}"
+        echo "command=feline $*"
+        echo "created=$(date '+%Y-%m-%d %H:%M')"
+    } > "$meta"
+}
+
+# ── List scheduled tasks ───────────────────────────────────────────────────────
+cmd_list() {
+    local metas=("$SCHEDULE_DIR"/*.meta)
+    if [[ ! -e "${metas[0]:-}" ]]; then
+        echo -e "\n  ${DIM}No scheduled tasks.${RESET}\n"
+        echo -e "  ${DIM}Schedule one: feline schedule <time> <command>${RESET}\n"
+        exit 0
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Scheduled Tasks${RESET}"
+    echo ""
+    printf "  ${DIM}%-8s  %-10s  %-10s  %s${RESET}\n" "ID" "REPEAT" "TIME" "COMMAND"
+    printf "  ${DIM}%s${RESET}\n" "────────────────────────────────────────────────"
+
+    for meta in "${metas[@]}"; do
+        [[ -f "$meta" ]] || continue
+        local id repeat time cmd
+        id=$(grep '^id=' "$meta" | cut -d= -f2-)
+        repeat=$(grep '^repeat=' "$meta" | cut -d= -f2-)
+        time=$(grep '^time=' "$meta" | cut -d= -f2-)
+        cmd=$(grep '^command=' "$meta" | cut -d= -f2-)
+
+        local repeat_color
+        case "$repeat" in
+            daily)  repeat_color="$GREEN" ;;
+            weekly) repeat_color="$CYAN" ;;
+            *)      repeat_color="$DIM" ;;
+        esac
+
+        printf "  ${CYAN}%-8s${RESET}  %b%-10s${RESET}  %-10s  ${BOLD}%s${RESET}\n" \
+            "$id" "$repeat_color" "$repeat" "$time" "$cmd"
+    done
+    echo ""
+    echo -e "  ${DIM}Remove a task: feline schedule remove <id>${RESET}\n"
+}
+
+# ── Remove a task ──────────────────────────────────────────────────────────────
+cmd_remove() {
+    local id="${1:-}"
+    [[ -z "$id" ]] && die "Usage: feline schedule remove <id>"
+
+    local meta="$SCHEDULE_DIR/${id}.meta"
+    [[ -f "$meta" ]] || die "no scheduled task with id '$id'. Run 'feline schedule list'."
+
+    local label
+    label=$(grep '^label=' "$meta" | cut -d= -f2-)
+    local plist="$AGENTS_DIR/${label}.plist"
+    local wrapper="$SCHEDULE_DIR/${id}.sh"
+
+    launchctl unload "$plist" 2>/dev/null || true
+    rm -f "$plist" "$wrapper" "$meta" "$SCHEDULE_DIR/${id}.log"
+
+    echo -e "${GREEN}✓${RESET}  Removed task ${CYAN}${id}${RESET}"
+}
+
+# ── Schedule a new task ────────────────────────────────────────────────────────
+cmd_schedule() {
+    # First token is the time (or "in")
+    local time_tok="${1:-}"
+    [[ -z "$time_tok" ]] && usage
+    shift
+
+    # Consume optional second token for "in Xm/Xh"
+    local second_tok=""
+    if [[ "$time_tok" == "in" ]]; then
+        second_tok="${1:-}"
+        [[ -z "$second_tok" ]] && die "expected duration after 'in' (e.g. in 30m)"
+        shift
+    fi
+
+    # Everything remaining until --daily/--weekly is the feline command
+    local repeat="once"
+    local feline_args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --daily)  repeat="daily" ;;
+            --weekly) repeat="weekly" ;;
+            *)        feline_args+=("$1") ;;
+        esac
+        shift
+    done
+
+    [[ ${#feline_args[@]} -eq 0 ]] && die "no command specified. Usage: feline schedule <time> <command>"
+
+    # Validate the feline subcommand
+    local subcmd="${feline_args[0]}"
+    command -v "feline-${subcmd}" &>/dev/null || \
+        die "'${subcmd}' is not a feline command. Run 'feline --help' to see commands."
+
+    # Parse time
+    parse_time "$time_tok" "$second_tok"
+
+    # Build human-readable time description
+    local time_desc
+    if [[ -n "$PARSED_DELAY" ]]; then
+        local mins=$(( PARSED_DELAY / 60 ))
+        if (( mins >= 60 )); then
+            time_desc="in $((mins / 60))h$((mins % 60 == 0 ? "" : "${mins % 60}m"))"
+        else
+            time_desc="in ${mins}m"
+        fi
+    else
+        time_desc=$(printf "%02d:%02d" "$PARSED_HOUR" "$PARSED_MIN")
+    fi
+
+    # Build IDs and paths
+    local id; id=$(make_id)
+    local label="${LABEL_PREFIX}.${id}"
+    local wrapper="$SCHEDULE_DIR/${id}.sh"
+    local plist="$AGENTS_DIR/${label}.plist"
+
+    write_wrapper "$wrapper" "$label" "$plist" "$repeat" "${feline_args[@]}"
+    write_plist "$label" "$wrapper" "${PARSED_HOUR:-}" "${PARSED_MIN:-}" "$repeat"
+    save_meta "$id" "$label" "$repeat" "$time_desc" "${feline_args[@]}"
+
+    launchctl load "$plist" 2>/dev/null || die "launchctl failed to load the task."
+
+    local repeat_note=""
+    [[ "$repeat" != "once" ]] && repeat_note=" ${DIM}(${repeat})${RESET}"
+
+    echo -e "${GREEN}✓${RESET}  Scheduled ${BOLD}feline ${feline_args[*]}${RESET} at ${CYAN}${time_desc}${RESET}${repeat_note}"
+    echo -e "   ${DIM}ID: ${id}  —  cancel with: feline schedule remove ${id}${RESET}"
+}
+
+# ── Dispatch ───────────────────────────────────────────────────────────────────
+case "${1:-}" in
+    --help|-h) usage ;;
+    list)      cmd_list ;;
+    remove)    shift; cmd_remove "$@" ;;
+    "")        usage ;;
+    *)         cmd_schedule "$@" ;;
+esac

@@ -13,7 +13,13 @@ SCRIPTS     = download/feline-download \
               snap/feline-snap \
               search/feline-search \
               scrape/feline-scrape \
-              lock/feline-lock
+              lock/feline-lock \
+              settings/feline-settings \
+              ports/feline-ports \
+              schedule/feline-schedule \
+              update/feline-update \
+              update/feline-update-check \
+              meow/feline-meow
 
 .PHONY: all clean install uninstall
 

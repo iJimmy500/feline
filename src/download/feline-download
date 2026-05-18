@@ -6,11 +6,12 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
+PURPLE='\033[0;35m'
 DIM='\033[2m'
 RESET='\033[0m'
 
 usage() {
-    echo -e "${BOLD}feline download${RESET} — download a file or video from the internet"
+    echo -e "${PURPLE}${BOLD}feline${RESET}${BOLD} download${RESET} — download anything from the internet"
     echo ""
     echo -e "${BOLD}Usage:${RESET}"
     echo "  feline download <url> [filetype]"
@@ -19,10 +20,19 @@ usage() {
     echo "  feline download https://example.com/photo.png"
     echo "  feline download https://youtube.com/watch?v=xyz mp4"
     echo "  feline download https://youtube.com/watch?v=xyz mp3"
-    echo "  feline download https://example.com/page html"
+    echo "  feline download https://soundcloud.com/artist/track"
+    echo "  feline download https://twitter.com/user/status/123"
+    echo "  feline download https://reddit.com/r/sub/comments/xyz"
+    echo "  feline download https://instagram.com/p/xyz"
+    echo ""
+    echo -e "${BOLD}Supported platforms (via yt-dlp):${RESET}"
+    echo "  YouTube  SoundCloud  Twitter/X  Reddit  Instagram"
+    echo "  TikTok   Twitch      Vimeo      Facebook  Bandcamp"
+    echo "  Dailymotion  Mixcloud  Bilibili  Rumble  + 1000 more"
     echo ""
     echo -e "${BOLD}Notes:${RESET}"
-    echo "  Video URLs (YouTube, Vimeo, etc.) require yt-dlp: brew install yt-dlp"
+    echo "  Platform downloads require yt-dlp: brew install yt-dlp"
+    echo "  Audio extraction (mp3, flac, etc.) also requires: brew install ffmpeg"
     exit 0
 }
 
@@ -31,38 +41,65 @@ die() {
     exit 1
 }
 
-is_video_url() {
-    [[ "$1" =~ (youtube\.com|youtu\.be|vimeo\.com|twitch\.tv|dailymotion\.com|tiktok\.com) ]]
+is_platform_url() {
+    [[ "$1" =~ (youtube\.com|youtu\.be|vimeo\.com|twitch\.tv|dailymotion\.com|tiktok\.com|\
+soundcloud\.com|twitter\.com|x\.com|reddit\.com|instagram\.com|facebook\.com|fb\.watch|\
+bandcamp\.com|mixcloud\.com|bilibili\.com|rumble\.com|streamable\.com|medal\.tv|\
+pinterest\.com|linkedin\.com|snapchat\.com|threads\.net|bsky\.app) ]]
 }
 
 require_cmd() {
     command -v "$1" &>/dev/null || die "$1 is required but not installed. Install with: brew install $1"
 }
 
+# Read configured download directory (falls back to ~/Downloads)
+FELINE_CONFIG="$HOME/.feline/config"
+DOWNLOAD_DIR=$(grep -E "^download\.dir=" "$FELINE_CONFIG" 2>/dev/null | tail -1 | cut -d'=' -f2- || true)
+DOWNLOAD_DIR="${DOWNLOAD_DIR:-$HOME/Downloads}"
+mkdir -p "$DOWNLOAD_DIR"
+
 [[ $# -lt 1 || "$1" == "--help" || "$1" == "-h" ]] && usage
 
 URL="$1"
 FILETYPE="${2:-}"
 
-if is_video_url "$URL"; then
+if is_platform_url "$URL"; then
     require_cmd yt-dlp
 
-    echo -e "${CYAN}Video URL detected.${RESET}"
+    # Show which platform we detected
+    PLATFORM=$(echo "$URL" | grep -oE '([a-z0-9-]+\.[a-z]{2,})' | head -1 | sed 's/^www\.//')
+    echo -e "${CYAN}Platform URL detected${RESET} ${DIM}(${PLATFORM})${RESET}"
+    echo -e "${DIM}Saving to ${DOWNLOAD_DIR}${RESET}"
 
     if [[ -n "$FILETYPE" ]]; then
         case "$FILETYPE" in
-            mp3|m4a|wav|flac|opus)
-                echo -e "${DIM}Extracting audio as ${FILETYPE}...${RESET}"
-                yt-dlp --extract-audio --audio-format "$FILETYPE" --audio-quality 0 "$URL"
+            mp3|m4a|wav|flac|opus|aac)
+                if command -v ffmpeg &>/dev/null; then
+                    # ffmpeg present — convert from best audio source
+                    echo -e "${DIM}Extracting audio as ${FILETYPE}...${RESET}"
+                    yt-dlp --extract-audio --audio-format "$FILETYPE" --audio-quality 0 \
+                        -P "$DOWNLOAD_DIR" "$URL"
+                else
+                    # No ffmpeg — try to grab a native file of the right format directly.
+                    # Works for platforms that serve mp3/m4a natively (SoundCloud, Bandcamp…).
+                    echo -e "${YELLOW}ffmpeg not found — trying to download native ${FILETYPE} directly.${RESET}"
+                    echo -e "${DIM}Install ffmpeg for full format support: brew install ffmpeg${RESET}"
+                    if ! yt-dlp --format "bestaudio[ext=${FILETYPE}]" \
+                            -P "$DOWNLOAD_DIR" "$URL" 2>/dev/null; then
+                        echo -e "${RED}Error:${RESET} Could not find a native ${FILETYPE} stream." >&2
+                        echo -e "${DIM}Install ffmpeg to convert from any source: brew install ffmpeg${RESET}" >&2
+                        exit 1
+                    fi
+                fi
                 ;;
             *)
                 echo -e "${DIM}Downloading as ${FILETYPE}...${RESET}"
-                yt-dlp --merge-output-format "$FILETYPE" "$URL"
+                yt-dlp --merge-output-format "$FILETYPE" -P "$DOWNLOAD_DIR" "$URL"
                 ;;
         esac
     else
         echo -e "${DIM}Downloading best available quality...${RESET}"
-        yt-dlp "$URL"
+        yt-dlp -P "$DOWNLOAD_DIR" "$URL"
     fi
 
     echo -e "${GREEN}Done.${RESET}"
@@ -82,18 +119,21 @@ else
         FILENAME="${FILENAME%.*}.${FILETYPE}"
     fi
 
+    DEST="${DOWNLOAD_DIR}/${FILENAME}"
+
     # Avoid silently overwriting existing files
-    if [[ -f "$FILENAME" ]]; then
+    if [[ -f "$DEST" ]]; then
         BASE="${FILENAME%.*}"
         EXT="${FILENAME##*.}"
         N=1
-        while [[ -f "${BASE}_${N}.${EXT}" ]]; do (( N++ )); done
+        while [[ -f "${DOWNLOAD_DIR}/${BASE}_${N}.${EXT}" ]]; do (( N++ )); done
         FILENAME="${BASE}_${N}.${EXT}"
+        DEST="${DOWNLOAD_DIR}/${FILENAME}"
         echo -e "${YELLOW}File exists — saving as${RESET} ${BOLD}${FILENAME}${RESET}"
     fi
 
-    echo -e "${CYAN}Downloading${RESET} ${BOLD}${FILENAME}${RESET}..."
-    curl -L --progress-bar -o "$FILENAME" "$URL"
-    SIZE=$(du -sh "$FILENAME" 2>/dev/null | cut -f1)
-    echo -e "${GREEN}Saved:${RESET} ${BOLD}${FILENAME}${RESET} ${DIM}(${SIZE})${RESET}"
+    echo -e "${CYAN}Downloading${RESET} ${BOLD}${FILENAME}${RESET} ${DIM}→ ${DOWNLOAD_DIR}${RESET}"
+    curl -L --progress-bar -o "$DEST" "$URL"
+    SIZE=$(du -sh "$DEST" 2>/dev/null | cut -f1)
+    echo -e "${GREEN}Saved:${RESET} ${BOLD}${DEST}${RESET} ${DIM}(${SIZE})${RESET}"
 fi

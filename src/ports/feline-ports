@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BOLD='\033[1m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BLUE='\033[0;34m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+usage() {
+    echo -e "${BOLD}feline ports${RESET} — see what's running on which ports"
+    echo ""
+    echo -e "${BOLD}Usage:${RESET}"
+    echo "  feline ports                    show all listening ports"
+    echo "  feline ports --all              include established connections too"
+    echo "  feline ports --port <n>         show what's on a specific port"
+    echo "  feline ports --kill <n>         kill the process on a port"
+    echo ""
+    echo -e "${BOLD}Examples:${RESET}"
+    echo "  feline ports"
+    echo "  feline ports --port 8080"
+    echo "  feline ports --kill 3000"
+    exit 0
+}
+
+die() { echo -e "${RED}Error:${RESET} $1" >&2; exit 1; }
+
+# ── Arg parsing ────────────────────────────────────────────────────────────────
+ALL=false
+FILTER_PORT=""
+KILL_PORT=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --help|-h) usage ;;
+        --all)     ALL=true ;;
+        --port)    shift; FILTER_PORT="$1" ;;
+        --kill)    shift; KILL_PORT="$1" ;;
+        *)         die "unknown option '$1'. Run 'feline ports --help' for usage." ;;
+    esac
+    shift
+done
+
+# ── Kill mode ──────────────────────────────────────────────────────────────────
+if [[ -n "$KILL_PORT" ]]; then
+    PIDS=$(lsof -ti :"$KILL_PORT" 2>/dev/null || true)
+    if [[ -z "$PIDS" ]]; then
+        echo -e "${YELLOW}Nothing found on port ${BOLD}${KILL_PORT}${RESET}"
+        exit 0
+    fi
+    for pid in $PIDS; do
+        name=$(ps -p "$pid" -o comm= 2>/dev/null | xargs basename 2>/dev/null || echo "unknown")
+        kill "$pid" 2>/dev/null && \
+            echo -e "${GREEN}✓${RESET}  Killed ${BOLD}${name}${RESET} ${DIM}(PID ${pid})${RESET} on port ${CYAN}${KILL_PORT}${RESET}" || \
+            echo -e "${RED}✗${RESET}  Could not kill PID ${pid} — try with sudo"
+    done
+    exit 0
+fi
+
+# ── Collect port data via lsof ─────────────────────────────────────────────────
+# -i: internet connections  -n: no hostname resolution  -P: no port name resolution
+if $ALL; then
+    LSOF_OUT=$(lsof -i -n -P 2>/dev/null || true)
+else
+    LSOF_OUT=$(lsof -i -n -P -sTCP:LISTEN 2>/dev/null || true)
+    # Also grab UDP
+    UDP_OUT=$(lsof -iUDP -n -P 2>/dev/null || true)
+    LSOF_OUT="${LSOF_OUT}"$'\n'"${UDP_OUT}"
+fi
+
+if [[ -z "$(echo "$LSOF_OUT" | grep -v '^COMMAND')" ]]; then
+    echo -e "\n${DIM}  No open ports found.${RESET}\n"
+    exit 0
+fi
+
+# ── Parse into structured rows ─────────────────────────────────────────────────
+declare -A SEEN
+
+echo ""
+if $ALL; then
+    echo -e "  ${BOLD}All Network Connections${RESET}"
+else
+    echo -e "  ${BOLD}Listening Ports${RESET}"
+fi
+echo ""
+printf "  ${DIM}%-6s  %-5s  %-22s  %-8s  %s${RESET}\n" "PORT" "PROTO" "PROCESS" "PID" "ADDRESS"
+printf "  ${DIM}%s${RESET}\n" "──────────────────────────────────────────────────────────"
+
+while IFS= read -r line; do
+    [[ "$line" =~ ^COMMAND ]] && continue
+    [[ -z "$line" ]] && continue
+
+    cmd=$(echo "$line"   | awk '{print $1}')
+    pid=$(echo "$line"   | awk '{print $2}')
+    proto=$(echo "$line" | awk '{print $8}')
+    name=$(echo "$line"  | awk '{print $9}')   # e.g. "localhost:3000" or "*:8080 (LISTEN)"
+
+    # Strip state annotation like "(LISTEN)" or "(ESTABLISHED)"
+    state=$(echo "$name" | grep -oE '\([A-Z]+\)' | tr -d '()' || true)
+    addr=$(echo "$name" | sed 's/ (.*//')
+
+    # Extract port from address (last :number)
+    port=$(echo "$addr" | grep -oE ':[0-9]+$' | tr -d ':' || true)
+    [[ -z "$port" ]] && continue
+
+    # Apply --port filter
+    [[ -n "$FILTER_PORT" && "$port" != "$FILTER_PORT" ]] && continue
+
+    # Deduplicate same pid+port
+    key="${pid}:${port}:${proto}"
+    [[ -n "${SEEN[$key]:-}" ]] && continue
+    SEEN[$key]=1
+
+    # Truncate long process names
+    display_cmd="${cmd:0:22}"
+
+    # Color by state / type
+    if [[ "$state" == "LISTEN" ]]; then
+        port_color="$GREEN"
+    elif [[ "$state" == "ESTABLISHED" ]]; then
+        port_color="$CYAN"
+    else
+        port_color="$YELLOW"
+    fi
+
+    # Color well-known ports
+    case "$port" in
+        80|443)       port_color="$BLUE" ;;
+        22)           port_color="$YELLOW" ;;
+        3306|5432|27017|6379) port_color="$CYAN" ;;
+    esac
+
+    printf "  %b%-6s%b  %-5s  ${BOLD}%-22s${RESET}  ${DIM}%-8s${RESET}  ${DIM}%s${RESET}\n" \
+        "$port_color" "$port" "$RESET" \
+        "$proto" \
+        "$display_cmd" \
+        "$pid" \
+        "$addr"
+
+done <<< "$LSOF_OUT"
+
+echo ""
+
+if [[ -n "$FILTER_PORT" && ${#SEEN[@]} -eq 0 ]]; then
+    echo -e "  ${DIM}Nothing found on port ${FILTER_PORT}.${RESET}\n"
+fi
+
+if [[ -z "$FILTER_PORT" ]] && ! $ALL; then
+    echo -e "  ${DIM}Show all connections: feline ports --all${RESET}"
+    echo -e "  ${DIM}Kill a port:         feline ports --kill <port>${RESET}"
+fi
+echo ""

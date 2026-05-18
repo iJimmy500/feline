@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BOLD='\033[1m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+PURPLE='\033[0;35m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+CONFIG_DIR="$HOME/.feline"
+CONFIG_FILE="$CONFIG_DIR/config"
+
+# ── Brew formula for each dep ──────────────────────────────────────────────────
+
+declare -A BREW_FORMULA=(
+    [yt-dlp]="yt-dlp"
+    [ffmpeg]="ffmpeg"
+    [magick]="imagemagick"
+    [pandoc]="pandoc"
+    [python3]="python3"
+    [curl]="curl"
+    [mdfind]=""        # built-in, no brew formula
+)
+
+# ── Config helpers ─────────────────────────────────────────────────────────────
+
+config_get() {
+    local key="$1"
+    [[ -f "$CONFIG_FILE" ]] && grep -E "^${key}=" "$CONFIG_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2- || true
+}
+
+config_set() {
+    local key="$1" value="$2"
+    mkdir -p "$CONFIG_DIR"
+    touch "$CONFIG_FILE"
+    local tmpfile
+    tmpfile=$(mktemp)
+    grep -vE "^${key}=" "$CONFIG_FILE" 2>/dev/null > "$tmpfile" || true
+    printf '%s=%s\n' "$key" "$value" >> "$tmpfile"
+    mv "$tmpfile" "$CONFIG_FILE"
+}
+
+config_unset() {
+    local key="$1"
+    [[ -f "$CONFIG_FILE" ]] || return 0
+    local tmpfile
+    tmpfile=$(mktemp)
+    grep -vE "^${key}=" "$CONFIG_FILE" 2>/dev/null > "$tmpfile" || true
+    mv "$tmpfile" "$CONFIG_FILE"
+}
+
+# ── Known settings ─────────────────────────────────────────────────────────────
+
+KNOWN_SETTINGS=(download.dir search.limit clean.confirm convert.dir convert.quality lock.action)
+
+setting_description() {
+    case "$1" in
+        download.dir)     echo "directory where downloads are saved" ;;
+        search.limit)     echo "default number of search results" ;;
+        clean.confirm)    echo "ask before cleaning (true/false)" ;;
+        convert.dir)      echo "directory where converted files are saved" ;;
+        convert.quality)  echo "image quality for lossy formats, 1-100" ;;
+        lock.action)      echo "what to do when a locked app is opened (quit/hide)" ;;
+        *)                echo "" ;;
+    esac
+}
+
+setting_default() {
+    case "$1" in
+        download.dir)     echo "$HOME/Downloads" ;;
+        search.limit)     echo "20" ;;
+        clean.confirm)    echo "true" ;;
+        convert.dir)      echo "(same folder as source)" ;;
+        convert.quality)  echo "(imagemagick default)" ;;
+        lock.action)      echo "quit" ;;
+        *)                echo "" ;;
+    esac
+}
+
+# ── Dep check helpers ──────────────────────────────────────────────────────────
+
+has_cmd() { command -v "$1" &>/dev/null; }
+
+dep_status_line() {
+    local dep="$1" required="$2"
+    if has_cmd "$dep"; then
+        printf "${GREEN}✓${RESET} %-12s" "$dep"
+    elif [[ "$required" == "req" ]]; then
+        printf "${RED}✗${RESET} ${BOLD}%-12s${RESET}" "$dep"
+    else
+        printf "${DIM}– %-12s${RESET}" "$dep"
+    fi
+}
+
+# Returns 0 if all required deps are present, 1 otherwise
+cmd_ready() {
+    local missing_req=0
+    for dep in "${@}"; do
+        if [[ "$dep" == req:* ]]; then
+            local d="${dep#req:}"
+            has_cmd "$d" || { missing_req=1; break; }
+        fi
+    done
+    return $missing_req
+}
+
+# ── Print command status table ─────────────────────────────────────────────────
+
+print_cmd_status() {
+    local label="$1"
+    shift
+    # args: req:<dep> or opt:<dep>
+    local deps=("$@")
+
+    local missing_req=() missing_opt=()
+    local has_any_dep=false
+
+    for dep in "${deps[@]}"; do
+        local type="${dep%%:*}" d="${dep#*:}"
+        [[ "$d" == "none" ]] && continue
+        has_any_dep=true
+        if ! has_cmd "$d"; then
+            [[ "$type" == "req" ]] && missing_req+=("$d") || missing_opt+=("$d")
+        fi
+    done
+
+    # Status badge
+    local badge
+    if [[ ${#missing_req[@]} -gt 0 ]]; then
+        badge="${RED}✗ needs setup${RESET}"
+    elif [[ ${#missing_opt[@]} -gt 0 ]]; then
+        badge="${YELLOW}⚠ partial${RESET}    "
+    else
+        badge="${GREEN}✓ ready${RESET}      "
+    fi
+
+    printf "  ${BOLD}%-12s${RESET}  %b  " "$label" "$badge"
+
+    # Dep indicators inline
+    for dep in "${deps[@]}"; do
+        local type="${dep%%:*}" d="${dep#*:}"
+        [[ "$d" == "none" ]] && continue
+        if has_cmd "$d"; then
+            printf "${GREEN}✓${RESET}${DIM}%s${RESET}  " "$d"
+        elif [[ "$type" == "req" ]]; then
+            printf "${RED}✗%s${RESET}  " "$d"
+        else
+            printf "${DIM}–%s${RESET}  " "$d"
+        fi
+    done
+    echo ""
+
+    # Hint line for anything missing
+    local all_missing=("${missing_req[@]}" "${missing_opt[@]}")
+    if [[ ${#all_missing[@]} -gt 0 ]]; then
+        local formulas=()
+        for d in "${all_missing[@]}"; do
+            local f="${BREW_FORMULA[$d]:-$d}"
+            [[ -n "$f" ]] && formulas+=("$f")
+        done
+        if [[ ${#formulas[@]} -gt 0 ]]; then
+            printf "  %-14s             ${DIM}brew install %s${RESET}\n" "" "${formulas[*]}"
+        fi
+    fi
+}
+
+# ── Collect all missing optional/required deps across all commands ─────────────
+
+collect_missing() {
+    local all_deps=(
+        opt:yt-dlp opt:ffmpeg opt:magick opt:pandoc
+    )
+    MISSING_BREW=()
+    for dep in "${all_deps[@]}"; do
+        local d="${dep#*:}"
+        if ! has_cmd "$d"; then
+            local f="${BREW_FORMULA[$d]:-$d}"
+            [[ -n "$f" ]] && MISSING_BREW+=("$f")
+        fi
+    done
+}
+
+# ── Usage ──────────────────────────────────────────────────────────────────────
+
+usage() {
+    echo -e "${PURPLE}${BOLD}feline${RESET}${BOLD} settings${RESET} — view and manage feline configuration"
+    echo ""
+    echo -e "${BOLD}Usage:${RESET}"
+    echo "  feline settings                     show settings and command status"
+    echo "  feline settings set <key> <value>   change a setting"
+    echo "  feline settings get <key>           print a setting's current value"
+    echo "  feline settings reset <key>         reset a setting to its default"
+    echo "  feline settings install             install all missing optional tools"
+    echo ""
+    echo -e "${BOLD}Available settings:${RESET}"
+    for s in "${KNOWN_SETTINGS[@]}"; do
+        printf "  %-16s  %s  ${DIM}(default: %s)${RESET}\n" \
+            "$s" "$(setting_description "$s")" "$(setting_default "$s")"
+    done
+    exit 0
+}
+
+# ── Subcommands ────────────────────────────────────────────────────────────────
+
+cmd_set() {
+    local key="${1:-}" value="${2:-}"
+    [[ -z "$key" || -z "$value" ]] && { echo -e "${RED}Usage:${RESET} feline settings set <key> <value>" >&2; exit 1; }
+
+    local valid=false
+    for s in "${KNOWN_SETTINGS[@]}"; do [[ "$s" == "$key" ]] && valid=true && break; done
+    if ! $valid; then
+        echo -e "${RED}Error:${RESET} unknown setting '$key'" >&2
+        echo -e "${DIM}Valid settings: ${KNOWN_SETTINGS[*]}${RESET}" >&2
+        exit 1
+    fi
+
+    # Expand ~ in path values
+    value="${value/#\~/$HOME}"
+    config_set "$key" "$value"
+    echo -e "${GREEN}✓${RESET}  ${BOLD}${key}${RESET} = ${CYAN}${value}${RESET}"
+}
+
+cmd_get() {
+    local key="${1:-}"
+    [[ -z "$key" ]] && { echo -e "${RED}Usage:${RESET} feline settings get <key>" >&2; exit 1; }
+    local val
+    val=$(config_get "$key")
+    if [[ -n "$val" ]]; then
+        echo "$val"
+    else
+        local def
+        def=$(setting_default "$key")
+        [[ -n "$def" ]] && echo "$def" || echo -e "${DIM}(not set)${RESET}"
+    fi
+}
+
+cmd_reset() {
+    local key="${1:-}"
+    [[ -z "$key" ]] && { echo -e "${RED}Usage:${RESET} feline settings reset <key>" >&2; exit 1; }
+    config_unset "$key"
+    echo -e "${GREEN}✓${RESET}  ${BOLD}${key}${RESET} reset to default ${DIM}($(setting_default "$key"))${RESET}"
+}
+
+cmd_install() {
+    collect_missing
+    if [[ ${#MISSING_BREW[@]} -eq 0 ]]; then
+        echo -e "${GREEN}All optional tools are already installed.${RESET}"
+        exit 0
+    fi
+
+    if ! has_cmd brew; then
+        echo -e "${RED}Error:${RESET} Homebrew is not installed." >&2
+        echo -e "${DIM}Install it at https://brew.sh then re-run: feline settings install${RESET}" >&2
+        exit 1
+    fi
+
+    echo -e "${CYAN}Installing:${RESET} ${MISSING_BREW[*]}"
+    echo ""
+    brew install "${MISSING_BREW[@]}"
+    echo ""
+    echo -e "${GREEN}Done.${RESET}"
+}
+
+cmd_show() {
+    local version
+    version=$(feline --version 2>/dev/null | awk '{print $2}' || echo "unknown")
+
+    echo ""
+    echo -e "  /\\_/\\   ${PURPLE}${BOLD}feline${RESET} ${DIM}v${version}${RESET}"
+    echo -e " ( ^.^ )  ${DIM}small, fast command line tools for your mac.${RESET}"
+    echo -e "  =( )=  "
+    echo ""
+    echo -e "${BOLD}Settings${RESET}"
+    echo ""
+
+    for key in "${KNOWN_SETTINGS[@]}"; do
+        local val default desc
+        val=$(config_get "$key")
+        default=$(setting_default "$key")
+        desc=$(setting_description "$key")
+        local display_val note
+
+        if [[ -n "$val" ]]; then
+            display_val="$val"
+            note=""
+        else
+            display_val="$default"
+            note="${DIM} (default)${RESET}"
+        fi
+
+        printf "  ${BOLD}%-16s${RESET}  ${CYAN}%s${RESET}%b\n" "$key" "$display_val" "$note"
+        printf "  %-16s  ${DIM}%s${RESET}\n" "" "$desc"
+        echo ""
+    done
+
+    echo -e "${BOLD}Command Status${RESET}"
+    echo ""
+
+    print_cmd_status "download"  req:curl        opt:yt-dlp
+    print_cmd_status "convert"   opt:ffmpeg      opt:magick      opt:pandoc
+    print_cmd_status "clean"     opt:none
+    print_cmd_status "context"   req:python3
+    print_cmd_status "snap"      req:python3
+    print_cmd_status "scrape"    req:python3
+    print_cmd_status "search"    req:mdfind
+    print_cmd_status "lock"      opt:none
+
+    echo ""
+
+    collect_missing
+    if [[ ${#MISSING_BREW[@]} -gt 0 ]]; then
+        echo -e "${DIM}Install missing tools: ${RESET}${BOLD}feline settings install${RESET}"
+        echo -e "${DIM}Or manually:           brew install ${MISSING_BREW[*]}${RESET}"
+    else
+        echo -e "${GREEN}All optional tools are installed.${RESET}"
+    fi
+
+    echo ""
+    echo -e "${DIM}Change a setting: feline settings set <key> <value>${RESET}"
+    echo ""
+}
+
+# ── Dispatch ───────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+    --help|-h) usage ;;
+    set)       shift; cmd_set "$@" ;;
+    get)       shift; cmd_get "$@" ;;
+    reset)     shift; cmd_reset "$@" ;;
+    install)   cmd_install ;;
+    "")        cmd_show ;;
+    *)         echo -e "${RED}Error:${RESET} unknown subcommand '$1'" >&2
+               echo -e "${DIM}Run 'feline settings --help' for usage.${RESET}" >&2
+               exit 1 ;;
+esac

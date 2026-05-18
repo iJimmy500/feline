@@ -33,8 +33,12 @@ SCRIPTS=(
     search/feline-search
     scrape/feline-scrape
     lock/feline-lock
+    settings/feline-settings
+    ports/feline-ports
+    schedule/feline-schedule
     update/feline-update
     update/feline-update-check
+    meow/feline-meow
 )
 
 # ── Sanity checks ──────────────────────────────────────────────────────────────

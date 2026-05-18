@@ -1,5 +1,7 @@
 # feline
 
+> **⚠ Experimental software.** feline is under active development. Features may change or break without notice. Use at your own risk.
+
 A small, fast set of command-line tools that make your Mac experience simpler.
 Each command is a separate, self-contained script — bundled together behind a
 single `feline` entry point so they share a clean, consistent feel.
@@ -18,7 +20,7 @@ feline update     check for and install the latest version
 
 ## Why feline?
 
-- **Small** — the dispatcher is a 33KB C binary. Tools are short scripts.
+- **Small** — the dispatcher is a tiny C binary (under 50KB). Tools are short scripts.
 - **Fast** — no slow startup, no JavaScript, no Electron.
 - **Native** — wraps macOS tools already on your system (`mdfind`, `mdls`,
   `osascript`, `pmset`, `launchctl`, etc.) instead of reinventing them.
@@ -250,5 +252,7 @@ The dispatcher works exactly like `git` does — `feline foo bar` exec's
 
 ## License
 
-MIT
+feline Community License v1.0 — see [LICENSE](LICENSE) for full terms.
+
+Copyright (c) 2026 james006 · https://phushsia.com/feline
 

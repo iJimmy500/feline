@@ -6,11 +6,33 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
+PURPLE='\033[0;35m'
 DIM='\033[2m'
 RESET='\033[0m'
 
+_SPIN_PID=""
+spin_start() {
+    local msg="${1:-}"
+    local frames=('=^.^=~    ' '=^.^= ~   ' '=^.^=  ~  ' '=^.^=   ~ ' '=^.^=    ~' '=^.^=   ~ ' '=^.^=  ~  ' '=^.^= ~   ')
+    ( trap '' INT TERM
+      local i=0
+      while true; do
+          printf "\r  ${PURPLE}${frames[$((i % ${#frames[@]}))]}${RESET}  ${DIM}${msg}${RESET}"
+          sleep 0.1
+          i=$(( i + 1 ))
+      done ) &
+    _SPIN_PID=$!
+}
+spin_stop() {
+    [[ -n "${_SPIN_PID:-}" ]] || return 0
+    kill "$_SPIN_PID" 2>/dev/null || true
+    wait "$_SPIN_PID" 2>/dev/null || true
+    _SPIN_PID=""
+    printf "\r\033[2K"
+}
+
 usage() {
-    echo -e "${BOLD}feline search${RESET} — fast file and app search powered by Spotlight"
+    echo -e "${PURPLE}${BOLD}feline${RESET}${BOLD} search${RESET} — fast file and app search powered by Spotlight"
     echo ""
     echo -e "${BOLD}Usage:${RESET}"
     echo "  feline search <query> [options]"
@@ -21,12 +43,17 @@ usage() {
     echo "  --dir <path>    Limit search to a specific directory"
     echo "  --type <ext>    Filter by file extension (e.g. pdf, py, mp4)"
     echo "  --limit <n>     Max results to show (default: 20)"
+    echo "  --open [n]      Open result n in its default app (default: 1)"
+    echo "  --reveal [n]    Reveal result n in Finder"
+    echo "  --copy [n]      Copy path of result n to clipboard"
     echo ""
     echo -e "${BOLD}Examples:${RESET}"
     echo "  feline search \"budget report\""
     echo "  feline search notes --type md"
     echo "  feline search xcode --apps"
     echo "  feline search \"TODO\" --content --dir ~/Projects"
+    echo "  feline search invoice --type pdf --open"
+    echo "  feline search invoice --type pdf --open 2"
     exit 0
 }
 
@@ -71,17 +98,23 @@ APPS_ONLY=false
 CONTENT=false
 SEARCH_DIR=""
 TYPE_FILTER=""
-LIMIT=20
+_cfg_limit=$(grep -E "^search\.limit=" "$HOME/.feline/config" 2>/dev/null | tail -1 | cut -d'=' -f2- || true)
+LIMIT="${_cfg_limit:-20}"
+ACTION=""       # open | reveal | copy
+ACTION_IDX=1    # which result number to act on
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --help|-h)    usage ;;
-        --apps)       APPS_ONLY=true ;;
-        --content)    CONTENT=true ;;
-        --dir)        shift; SEARCH_DIR="$1" ;;
-        --type)       shift; TYPE_FILTER="${1,,}" ;;
-        --limit)      shift; LIMIT="$1" ;;
-        *)            [[ -z "$QUERY" ]] && QUERY="$1" || QUERY="$QUERY $1" ;;
+        --help|-h)  usage ;;
+        --apps)     APPS_ONLY=true ;;
+        --content)  CONTENT=true ;;
+        --dir)      shift; SEARCH_DIR="$1" ;;
+        --type)     shift; TYPE_FILTER="${1,,}" ;;
+        --limit)    shift; LIMIT="$1" ;;
+        --open)     ACTION="open";   [[ "${2:-}" =~ ^[0-9]+$ ]] && { shift; ACTION_IDX="$1"; } ;;
+        --reveal)   ACTION="reveal"; [[ "${2:-}" =~ ^[0-9]+$ ]] && { shift; ACTION_IDX="$1"; } ;;
+        --copy)     ACTION="copy";   [[ "${2:-}" =~ ^[0-9]+$ ]] && { shift; ACTION_IDX="$1"; } ;;
+        *)          [[ -z "$QUERY" ]] && QUERY="$1" || QUERY="$QUERY $1" ;;
     esac
     shift
 done
@@ -107,7 +140,9 @@ fi
 echo ""
 echo -e "${BOLD}search:${RESET} ${CYAN}${QUERY}${RESET}${DIM}$(${APPS_ONLY} && echo '  [apps]')$([[ -n "$TYPE_FILTER" ]] && echo "  [.$TYPE_FILTER]")${RESET}"
 
+spin_start "searching..."
 mapfile -t RESULTS < <(mdfind "${MDFIND_ARGS[@]}" 2>/dev/null)
+spin_stop
 
 # Filter by type if requested
 if [[ -n "$TYPE_FILTER" ]]; then
@@ -142,13 +177,17 @@ echo -e "${DIM}  $TOTAL result$([ $TOTAL -ne 1 ] && echo 's') found$([ $TOTAL -g
 echo ""
 
 SHOWN=0
+INDEXED=()   # ordered list of displayed paths for --open/--reveal/--copy
+
 for path in "${RESULTS[@]}"; do
     [[ $SHOWN -ge $LIMIT ]] && break
     [[ -e "$path" ]] || continue
 
+    INDEXED+=("$path")
+    SHOWN=$(( SHOWN + 1 ))
+
     label=$(file_label "$path")
     size=$(fmt_size "$path")
-    date=$(fmt_date "$path")
 
     # Shorten home dir
     display="${path/#$HOME/~}"
@@ -157,23 +196,50 @@ for path in "${RESULTS[@]}"; do
 
     # Color by type
     case "$label" in
-        app)     name_color="$CYAN" ;;
-        code)    name_color="$GREEN" ;;
+        app)               name_color="$CYAN" ;;
+        code)              name_color="$GREEN" ;;
         image|video|audio) name_color="$YELLOW" ;;
-        *)       name_color="$BOLD" ;;
+        *)                 name_color="$BOLD" ;;
     esac
 
-    printf "  %b%-38s%b  %b%-8s%b  %b%s%b\n" \
+    printf "  ${DIM}%2d.${RESET}  %b%-36s%b  %b%-8s%b  %b%s%b\n" \
+        "$SHOWN" \
         "$name_color" "$name" "$RESET" \
         "$DIM" "$size" "$RESET" \
         "$DIM" "$dir" "$RESET"
-
-    SHOWN=$(( SHOWN + 1 ))
 done
 
 if [[ $TOTAL -gt $LIMIT ]]; then
     echo ""
-    echo -e "  ${DIM}… ${TOTAL - LIMIT} more results. Use --limit to see more.${RESET}"
+    echo -e "  ${DIM}… $((TOTAL - LIMIT)) more results. Use --limit to see more.${RESET}"
 fi
 
 echo ""
+
+# ── Action (--open / --reveal / --copy) ───────────────────────────────────────
+if [[ -n "$ACTION" ]]; then
+    if [[ ${#INDEXED[@]} -eq 0 ]]; then
+        echo -e "  ${RED}No results to act on.${RESET}\n"; exit 1
+    fi
+    if [[ "$ACTION_IDX" -gt ${#INDEXED[@]} ]]; then
+        echo -e "  ${RED}Result ${ACTION_IDX} doesn't exist (only ${#INDEXED[@]} shown).${RESET}\n"; exit 1
+    fi
+    target="${INDEXED[$((ACTION_IDX - 1))]}"
+    case "$ACTION" in
+        open)
+            echo -e "  ${CYAN}Opening${RESET} ${BOLD}$(basename "$target")${RESET}..."
+            open "$target"
+            ;;
+        reveal)
+            echo -e "  ${CYAN}Revealing in Finder:${RESET} ${DIM}${target}${RESET}"
+            open -R "$target"
+            ;;
+        copy)
+            echo -n "$target" | pbcopy
+            echo -e "  ${GREEN}✓${RESET}  Path copied to clipboard: ${DIM}${target}${RESET}"
+            ;;
+    esac
+    echo ""
+elif [[ ${#INDEXED[@]} -gt 0 && -z "$ACTION" ]]; then
+    echo -e "  ${DIM}Tip: add --open, --reveal, or --copy to act on a result.${RESET}\n"
+fi

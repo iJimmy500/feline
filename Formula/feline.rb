@@ -4,7 +4,7 @@ class Feline < Formula
   version "1.2.0"
 
   url "https://github.com/iJimmy500/feline/releases/download/v1.2.0/feline-1.2.0-macos.tar.gz"
-  sha256 "PLACEHOLDER"
+  sha256 "7249b10e0e279dc860fe6f7d976df10473fe692572ce55c4991265ce8e504893"
 
   # feline works without these, but they unlock extra capabilities
   depends_on "ffmpeg"      => :optional

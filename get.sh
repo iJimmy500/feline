@@ -14,7 +14,7 @@ DIM='\033[2m'
 RESET='\033[0m'
 
 REPO="iJimmy500/feline"
-VERSION="1.1.0"
+VERSION="1.2.0"
 BASE_URL="https://github.com/${REPO}/releases/download/v${VERSION}"
 TARBALL="feline-${VERSION}-macos.tar.gz"
 CHECKSUM_FILE="${TARBALL}.sha256"

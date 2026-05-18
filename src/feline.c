@@ -74,12 +74,12 @@ int main(int argc, char *argv[]) {
     }
 
     if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0) {
-        printf("feline 1.1.0\n");
+        printf("feline 1.2.0\n");
         return 0;
     }
 
     if (strcmp(argv[1], "--credits") == 0) {
-        printf("feline 1.1.0  (experimental)\n");
+        printf("feline 1.2.0  (experimental)\n");
         printf("Copyright (c) 2026 james006\n");
         printf("\n");
         printf("Licensed under the feline Community License v1.0\n");

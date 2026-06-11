@@ -94,7 +94,11 @@ def get_memory():
         if m:
             pages[m.group(1).strip()] = int(m.group(2))
 
-    page_size   = 4096
+    # Page size is 16384 on Apple Silicon, 4096 on Intel — read the real value
+    # from vm_stat's header rather than hardcoding it.
+    ps_match  = re.search(r'page size of (\d+) bytes', vm)
+    page_size = int(ps_match.group(1)) if ps_match else \
+                int(run(['sysctl', '-n', 'hw.pagesize']) or 4096)
     wired       = pages.get('wired down', 0)       * page_size
     active      = pages.get('active', 0)           * page_size
     compressed  = pages.get('occupied by compressor', 0) * page_size

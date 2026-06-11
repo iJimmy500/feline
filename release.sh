@@ -92,6 +92,7 @@ done
 cp install.sh   "$STAGING/install.sh"
 cp uninstall.sh "$STAGING/uninstall.sh"
 cp README.md    "$STAGING/README.md"
+cp VERSION      "$STAGING/VERSION"
 chmod 755 "$STAGING/install.sh" "$STAGING/uninstall.sh"
 
 # ── Create tarball ─────────────────────────────────────────────────────────────

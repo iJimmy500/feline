@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# macOS ships bash 3.2, which lacks features this script relies on
+# (associative arrays, mapfile, ${var,,}). Re-exec under a newer bash if
+# one is available (Homebrew installs one), otherwise explain.
+if (( BASH_VERSINFO[0] < 4 )); then
+    for _newer_bash in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+        [[ -x "$_newer_bash" ]] && exec "$_newer_bash" "$0" "$@"
+    done
+    echo "feline: this command needs bash 4+ (macOS ships 3.2). Install it with: brew install bash" >&2
+    exit 1
+fi
+
 BOLD='\033[1m'
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -14,7 +25,10 @@ _SPIN_PID=""
 spin_start() {
     local msg="${1:-}"
     local frames=('=^.^=~    ' '=^.^= ~   ' '=^.^=  ~  ' '=^.^=   ~ ' '=^.^=    ~' '=^.^=   ~ ' '=^.^=  ~  ' '=^.^= ~   ')
-    ( trap '' INT TERM
+    # Ignore INT (ctrl-C is handled by the parent) but NOT TERM —
+    # spin_stop kills this subshell with TERM; ignoring it would make
+    # `wait` block forever and hang the whole command.
+    ( trap '' INT
       local i=0
       while true; do
           printf "\r  ${PURPLE}${frames[$((i % ${#frames[@]}))]}${RESET}  ${DIM}${msg}${RESET}"
@@ -114,7 +128,7 @@ while [[ $i -le $# ]]; do
             [[ -d "$SEARCH_DIR" ]] || { echo -e "${RED}Error:${RESET} --dir path not found: $SEARCH_DIR" >&2; exit 1; }
             ;;
         *)
-            if echo "$VALID_TARGETS" | grep -qw "$arg"; then
+            if [[ " $VALID_TARGETS " == *" $arg "* ]]; then
                 TARGETS+=("$arg")
             else
                 echo -e "${RED}Unknown target:${RESET} '$arg'" >&2
@@ -241,7 +255,7 @@ for t in "${TARGETS[@]}"; do
             SZ=0
             for f in "${found[@]}"; do
                 b=$(du -k "$f" 2>/dev/null | cut -f1)
-                SZ=$(( SZ + b ))
+                SZ=$(( SZ + ${b:-0} ))
             done
             TARGET_SIZE[$t]="${COUNT} files ($(fmt_kb $SZ))"
             FIND_RESULTS+=("ds-store:$ROOT")
@@ -253,7 +267,7 @@ for t in "${TARGETS[@]}"; do
             SZ=0
             for f in "${found[@]}"; do
                 b=$(du -sk "$f" 2>/dev/null | cut -f1)
-                SZ=$(( SZ + b ))
+                SZ=$(( SZ + ${b:-0} ))
             done
             TARGET_SIZE[$t]="${COUNT} dirs ($(fmt_kb $SZ))"
             FIND_RESULTS+=("node-modules:$ROOT")
@@ -265,7 +279,7 @@ for t in "${TARGETS[@]}"; do
             SZ=0
             for f in "${found[@]}"; do
                 b=$(du -sk "$f" 2>/dev/null | cut -f1)
-                SZ=$(( SZ + b ))
+                SZ=$(( SZ + ${b:-0} ))
             done
             TARGET_SIZE[$t]="${COUNT} dirs ($(fmt_kb $SZ))"
             FIND_RESULTS+=("pycache:$ROOT")
@@ -379,7 +393,9 @@ clean_paths() {
 
     local before
     before=$(du -sk "${existing[@]}" 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
-    rm -rf "${existing[@]}"
+    # Some cache entries are protected (SIP, app sandboxes) — rm will fail on
+    # those; don't abort the whole run because of them.
+    rm -rf "${existing[@]}" 2>/dev/null || true
     TOTAL_FREED_KB=$(( TOTAL_FREED_KB + before ))
     echo -e "  ${GREEN}✓${RESET} ${label} ${DIM}($(fmt_kb $before) freed)${RESET}"
 }
@@ -392,9 +408,9 @@ clean_find() {
     local before=0
     for f in "${found[@]}"; do
         local b; b=$(du -sk "$f" 2>/dev/null | cut -f1)
-        before=$(( before + b ))
+        before=$(( before + ${b:-0} ))
     done
-    rm -rf "${found[@]}"
+    rm -rf "${found[@]}" 2>/dev/null || true
     TOTAL_FREED_KB=$(( TOTAL_FREED_KB + before ))
     echo -e "  ${GREEN}✓${RESET} ${label} ${DIM}(${#found[@]} removed, $(fmt_kb $before) freed)${RESET}"
 }
@@ -407,8 +423,8 @@ for t in "${TARGETS[@]}"; do
                 BREW_CACHE=$(brew --cache 2>/dev/null || true)
                 before=$(du -sk "$BREW_CACHE" 2>/dev/null | cut -f1 || echo 0)
                 brew cleanup -q 2>/dev/null || true
-                echo -e "  ${GREEN}✓${RESET} Homebrew cache ${DIM}($(fmt_kb $before) freed)${RESET}"
-                TOTAL_FREED_KB=$(( TOTAL_FREED_KB + before ))
+                echo -e "  ${GREEN}✓${RESET} Homebrew cache ${DIM}($(fmt_kb ${before:-0}) freed)${RESET}"
+                TOTAL_FREED_KB=$(( TOTAL_FREED_KB + ${before:-0} ))
             fi
             ;;
         ios-sim)

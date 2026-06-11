@@ -13,7 +13,7 @@ PREFIX="${PREFIX:-/usr/local}"
 BINDIR="$PREFIX/bin"
 LIBDIR="$PREFIX/lib/feline"
 
-# All binaries feline installs
+# All binaries feline installs (keep in sync with install.sh / release.sh)
 BINS=(
     feline
     feline-download
@@ -24,6 +24,12 @@ BINS=(
     feline-search
     feline-scrape
     feline-lock
+    feline-settings
+    feline-ports
+    feline-schedule
+    feline-update
+    feline-update-check
+    feline-meow
 )
 
 echo ""
@@ -69,8 +75,9 @@ if [[ -f "$WATCHDOG_PLIST" ]]; then
     echo -e "  ${GREEN}✓${RESET}  Removed lock watchdog"
 fi
 
-# Remove any per-lock expiry agents
-for plist in "$HOME/Library/LaunchAgents/com.feline.lock.expire."*.plist; do
+# Remove any per-lock expiry agents and scheduled-task agents
+for plist in "$HOME/Library/LaunchAgents/com.feline.lock.expire."*.plist \
+             "$HOME/Library/LaunchAgents/com.feline.schedule."*.plist; do
     [[ -f "$plist" ]] || continue
     launchctl unload "$plist" 2>/dev/null || true
     rm -f "$plist"

@@ -263,23 +263,31 @@ def dir_context(path):
             n = info['count']
             print(f"  {DIM}{ext:<14}{RESET}  {n:>4} file{'s' if n != 1 else ''}   {fmt_size(info['size'])}")
 
+    # Stat each file once, tolerating files that vanish mid-scan
+    stats = []
+    for f in files:
+        try:
+            stats.append((f, f.stat()))
+        except OSError:
+            pass
+
     # Largest files
-    sized = sorted(((f, f.stat().st_size) for f in files if f.exists()), key=lambda x: x[1], reverse=True)
+    sized = sorted(stats, key=lambda x: x[1].st_size, reverse=True)
     if sized:
         print()
         print(rule("Largest files"))
-        for f, size in sized[:5]:
+        for f, st_f in sized[:5]:
             rel = os.path.relpath(f, p)
-            print(f"  {DIM}{fmt_size(size):>10}{RESET}  {rel}")
+            print(f"  {DIM}{fmt_size(st_f.st_size):>10}{RESET}  {rel}")
 
     # Recently modified
-    recent = sorted(files, key=lambda f: f.stat().st_mtime, reverse=True)[:5]
+    recent = sorted(stats, key=lambda x: x[1].st_mtime, reverse=True)[:5]
     if recent:
         print()
         print(rule("Recently modified"))
-        for f in recent:
+        for f, st_f in recent:
             rel   = os.path.relpath(f, p)
-            mtime = fmt_date(f.stat().st_mtime)
+            mtime = fmt_date(st_f.st_mtime)
             print(f"  {DIM}{mtime}{RESET}   {rel}")
 
     # Git

@@ -140,12 +140,16 @@ done
 echo ""
 
 # ── Dependency check ───────────────────────────────────────────────────────────
-declare -A BREW_FORMULA=(
-    [ffmpeg]="ffmpeg"
-    [yt-dlp]="yt-dlp"
-    [magick]="imagemagick"
-    [pandoc]="pandoc"
-)
+# Plain list + lookup function (not `declare -A`) so this still works under
+# the bash 3.2 that ships with macOS.
+OPTIONAL_DEPS=(ffmpeg yt-dlp magick pandoc)
+
+brew_formula() {
+    case "$1" in
+        magick) echo "imagemagick" ;;
+        *)      echo "$1" ;;
+    esac
+}
 
 MISSING=()
 
@@ -153,11 +157,11 @@ echo -e "${BOLD}Checking optional dependencies...${RESET}"
 echo -e "${DIM}(these add extra capabilities — feline works without them)${RESET}"
 echo ""
 
-for bin in "${!BREW_FORMULA[@]}"; do
+for bin in "${OPTIONAL_DEPS[@]}"; do
     if command -v "$bin" &>/dev/null; then
         echo -e "  ${GREEN}✓${RESET}  $bin"
     else
-        echo -e "  ${DIM}–${RESET}  $bin  ${DIM}(${BREW_FORMULA[$bin]})${RESET}"
+        echo -e "  ${DIM}–${RESET}  $bin  ${DIM}($(brew_formula "$bin"))${RESET}"
         MISSING+=("$bin")
     fi
 done
@@ -178,8 +182,17 @@ fi
 
 FORMULAS=()
 for bin in "${MISSING[@]}"; do
-    FORMULAS+=("${BREW_FORMULA[$bin]}")
+    FORMULAS+=("$(brew_formula "$bin")")
 done
+
+# When run via `curl | bash`, stdin is not a terminal — skip the prompt
+# instead of dying on EOF (set -e would abort the whole install).
+if [[ ! -t 0 ]]; then
+    echo -e "${DIM}Non-interactive install — skipping optional tools.${RESET}"
+    echo -e "${DIM}Install later with: brew install ${FORMULAS[*]}${RESET}"
+    print_done
+    exit 0
+fi
 
 echo -e "Install missing tools now? ${DIM}(${FORMULAS[*]})${RESET}"
 echo -n -e "${BOLD}[y/n]:${RESET} "

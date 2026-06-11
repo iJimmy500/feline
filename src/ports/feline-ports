@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# macOS ships bash 3.2, which lacks features this script relies on
+# (associative arrays, mapfile, ${var,,}). Re-exec under a newer bash if
+# one is available (Homebrew installs one), otherwise explain.
+if (( BASH_VERSINFO[0] < 4 )); then
+    for _newer_bash in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+        [[ -x "$_newer_bash" ]] && exec "$_newer_bash" "$0" "$@"
+    done
+    echo "feline: this command needs bash 4+ (macOS ships 3.2). Install it with: brew install bash" >&2
+    exit 1
+fi
+
 BOLD='\033[1m'
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -62,16 +73,19 @@ fi
 
 # ── Collect port data via lsof ─────────────────────────────────────────────────
 # -i: internet connections  -n: no hostname resolution  -P: no port name resolution
+# -F: machine-readable output (one field per line). Column-based parsing breaks
+#     when process names contain spaces ("Google Chrome"), so we use -F instead:
+#     p<pid> c<command> then per socket: f<fd> P<proto> n<addr> TST=<state>
 if $ALL; then
-    LSOF_OUT=$(lsof -i -n -P 2>/dev/null || true)
+    LSOF_OUT=$(lsof -i -n -P -FpcPnT 2>/dev/null || true)
 else
-    LSOF_OUT=$(lsof -i -n -P -sTCP:LISTEN 2>/dev/null || true)
+    LSOF_OUT=$(lsof -i -n -P -sTCP:LISTEN -FpcPnT 2>/dev/null || true)
     # Also grab UDP
-    UDP_OUT=$(lsof -iUDP -n -P 2>/dev/null || true)
+    UDP_OUT=$(lsof -iUDP -n -P -FpcPn 2>/dev/null || true)
     LSOF_OUT="${LSOF_OUT}"$'\n'"${UDP_OUT}"
 fi
 
-if [[ -z "$(echo "$LSOF_OUT" | grep -v '^COMMAND')" ]]; then
+if [[ -z "${LSOF_OUT//[[:space:]]/}" ]]; then
     echo -e "\n${DIM}  No open ports found.${RESET}\n"
     exit 0
 fi
@@ -89,38 +103,34 @@ echo ""
 printf "  ${DIM}%-6s  %-5s  %-22s  %-8s  %s${RESET}\n" "PORT" "PROTO" "PROCESS" "PID" "ADDRESS"
 printf "  ${DIM}%s${RESET}\n" "──────────────────────────────────────────────────────────"
 
-while IFS= read -r line; do
-    [[ "$line" =~ ^COMMAND ]] && continue
-    [[ -z "$line" ]] && continue
+pid="" cmd="" proto="" addr="" state=""
 
-    cmd=$(echo "$line"   | awk '{print $1}')
-    pid=$(echo "$line"   | awk '{print $2}')
-    proto=$(echo "$line" | awk '{print $8}')
-    name=$(echo "$line"  | awk '{print $9}')   # e.g. "localhost:3000" or "*:8080 (LISTEN)"
-
-    # Strip state annotation like "(LISTEN)" or "(ESTABLISHED)"
-    state=$(echo "$name" | grep -oE '\([A-Z]+\)' | tr -d '()' || true)
-    addr=$(echo "$name" | sed 's/ (.*//')
+# Print the buffered socket (if any) and clear its per-socket fields.
+flush_row() {
+    local a="$addr" s="$state"
+    addr="" state=""
+    [[ -n "$a" ]] || return 0
 
     # Extract port from address (last :number)
-    port=$(echo "$addr" | grep -oE ':[0-9]+$' | tr -d ':' || true)
-    [[ -z "$port" ]] && continue
+    local port="${a##*:}"
+    [[ "$port" =~ ^[0-9]+$ ]] || return 0
 
     # Apply --port filter
-    [[ -n "$FILTER_PORT" && "$port" != "$FILTER_PORT" ]] && continue
+    [[ -n "$FILTER_PORT" && "$port" != "$FILTER_PORT" ]] && return 0
 
     # Deduplicate same pid+port
-    key="${pid}:${port}:${proto}"
-    [[ -n "${SEEN[$key]:-}" ]] && continue
+    local key="${pid}:${port}:${proto}"
+    [[ -n "${SEEN[$key]:-}" ]] && return 0
     SEEN[$key]=1
 
     # Truncate long process names
-    display_cmd="${cmd:0:22}"
+    local display_cmd="${cmd:0:22}"
 
     # Color by state / type
-    if [[ "$state" == "LISTEN" ]]; then
+    local port_color
+    if [[ "$s" == "LISTEN" ]]; then
         port_color="$GREEN"
-    elif [[ "$state" == "ESTABLISHED" ]]; then
+    elif [[ "$s" == "ESTABLISHED" ]]; then
         port_color="$CYAN"
     else
         port_color="$YELLOW"
@@ -138,9 +148,20 @@ while IFS= read -r line; do
         "$proto" \
         "$display_cmd" \
         "$pid" \
-        "$addr"
+        "$a"
+}
 
+while IFS= read -r line; do
+    case "$line" in
+        p*)     flush_row; pid="${line#p}" ;;
+        c*)     cmd="${line#c}" ;;
+        f*)     flush_row ;;
+        P*)     proto="${line#P}" ;;
+        n*)     addr="${line#n}" ;;
+        TST=*)  state="${line#TST=}" ;;
+    esac
 done <<< "$LSOF_OUT"
+flush_row
 
 echo ""
 

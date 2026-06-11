@@ -103,17 +103,21 @@ fi
 
 echo -e "${CYAN}Converting${RESET} ${BOLD}${INPUT}${RESET} → ${BOLD}$(basename "$OUTPUT")${RESET}..."
 
+# Quality flag shared by the image conversion branches.
+# `${q_flag[@]+"${q_flag[@]}"}` expands to nothing when the array is empty,
+# which is safe under `set -u` on every bash version.
+q_flag=()
+[[ -n "$IMG_QUALITY" ]] && q_flag=(-quality "$IMG_QUALITY")
+
 # ── Image → image / image → gif ───────────────────────────────────────────────
 if [[ "$SRC_CAT" == "image" && ( "$DST_CAT" == "image" || "$TARGET_EXT" == "gif" ) ]]; then
-    local q_flag=()
-    [[ -n "$IMG_QUALITY" ]] && q_flag=(-quality "$IMG_QUALITY")
     if command -v magick &>/dev/null; then
-        magick "${q_flag[@]}" "$INPUT" "$OUTPUT"
+        magick ${q_flag[@]+"${q_flag[@]}"} "$INPUT" "$OUTPUT"
     elif command -v convert &>/dev/null; then
-        convert "${q_flag[@]}" "$INPUT" "$OUTPUT"
+        convert ${q_flag[@]+"${q_flag[@]}"} "$INPUT" "$OUTPUT"
     elif command -v sips &>/dev/null; then
         # macOS built-in — handles HEIC, JPEG, PNG, TIFF, GIF, BMP natively
-        local sips_fmt="$TARGET_EXT"
+        sips_fmt="$TARGET_EXT"
         [[ "$sips_fmt" == "jpg" ]] && sips_fmt="jpeg"
         sips -s format "$sips_fmt" "$INPUT" --out "$OUTPUT" &>/dev/null \
             || die "sips could not convert this format. Install imagemagick: brew install imagemagick"
@@ -123,12 +127,10 @@ if [[ "$SRC_CAT" == "image" && ( "$DST_CAT" == "image" || "$TARGET_EXT" == "gif"
 
 # ── Image → pdf (embed) ────────────────────────────────────────────────────────
 elif [[ "$SRC_CAT" == "image" && "$TARGET_EXT" == "pdf" ]]; then
-    local q_flag=()
-    [[ -n "$IMG_QUALITY" ]] && q_flag=(-quality "$IMG_QUALITY")
     if command -v magick &>/dev/null; then
-        magick "${q_flag[@]}" "$INPUT" "$OUTPUT"
+        magick ${q_flag[@]+"${q_flag[@]}"} "$INPUT" "$OUTPUT"
     elif command -v convert &>/dev/null; then
-        convert "${q_flag[@]}" "$INPUT" "$OUTPUT"
+        convert ${q_flag[@]+"${q_flag[@]}"} "$INPUT" "$OUTPUT"
     else
         die "imagemagick is required. Install with: brew install imagemagick"
     fi

@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# macOS ships bash 3.2, which lacks features this script relies on
+# (associative arrays, mapfile, ${var,,}). Re-exec under a newer bash if
+# one is available (Homebrew installs one), otherwise explain.
+if (( BASH_VERSINFO[0] < 4 )); then
+    for _newer_bash in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+        [[ -x "$_newer_bash" ]] && exec "$_newer_bash" "$0" "$@"
+    done
+    echo "feline: this command needs bash 4+ (macOS ships 3.2). Install it with: brew install bash" >&2
+    exit 1
+fi
+
 BOLD='\033[1m'
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -182,7 +193,9 @@ hash_str() { printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1; }
 
 gen_recovery_key() {
     # Format: XXXX-XXXX-XXXX-XXXX
-    cat /dev/urandom | LC_ALL=C tr -dc 'A-Z0-9' | head -c 16 | \
+    # Read a bounded chunk of urandom: an unbounded read gets SIGPIPE when
+    # `head` exits, which kills the script under pipefail.
+    head -c 512 /dev/urandom | LC_ALL=C tr -dc 'A-Z0-9' | head -c 16 | \
         sed 's/\(.\{4\}\)\(.\{4\}\)\(.\{4\}\)\(.\{4\}\)/\1-\2-\3-\4/'
 }
 
@@ -677,11 +690,12 @@ cmd_list() {
 }
 
 # ── Entry ──────────────────────────────────────────────────────────────────────
-[[ $# -eq 0 ]] && usage
+[[ $# -eq 0 || "$1" == "--help" || "$1" == "-h" ]] && usage
+# Sweep expired locks only after the help check — removing an expired site
+# lock touches /etc/hosts, and --help should never trigger a sudo prompt.
 cleanup_expired
 
 case "$1" in
-    --help|-h)        usage ;;
     --list|-l)        cmd_list ;;
     --unlock)
         [[ $# -lt 2 ]] && die "usage: feline lock --unlock <target>"

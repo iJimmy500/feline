@@ -96,7 +96,9 @@ parse_time() {
 
 # ── Short unique ID ────────────────────────────────────────────────────────────
 make_id() {
-    LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | head -c 6
+    # Read a bounded chunk of urandom first: an unbounded `tr < /dev/urandom`
+    # gets SIGPIPE when `head` exits, which kills the script under pipefail.
+    head -c 512 /dev/urandom | LC_ALL=C tr -dc 'a-z0-9' | head -c 6
 }
 
 # ── Write LaunchAgent plist ────────────────────────────────────────────────────
@@ -303,8 +305,10 @@ cmd_schedule() {
     local time_desc
     if [[ -n "$PARSED_DELAY" ]]; then
         local mins=$(( PARSED_DELAY / 60 ))
-        if (( mins >= 60 )); then
-            time_desc="in $((mins / 60))h$((mins % 60 == 0 ? "" : "${mins % 60}m"))"
+        if (( mins >= 60 && mins % 60 == 0 )); then
+            time_desc="in $((mins / 60))h"
+        elif (( mins >= 60 )); then
+            time_desc="in $((mins / 60))h$((mins % 60))m"
         else
             time_desc="in ${mins}m"
         fi

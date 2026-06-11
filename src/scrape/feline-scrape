@@ -88,7 +88,8 @@ class ImageParser(HTMLParser):
         if tag == 'img':
             src = attrs.get('src') or attrs.get('data-src')
         if tag == 'source':
-            src = attrs.get('srcset', '').split()[0] or attrs.get('src')
+            srcset = (attrs.get('srcset') or '').split()
+            src = (srcset[0] if srcset else None) or attrs.get('src')
         if src:
             src = src.strip()
             if src.startswith('//'):

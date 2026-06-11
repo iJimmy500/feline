@@ -1,10 +1,10 @@
 class Feline < Formula
   desc "Small, fast command-line tools for your Mac"
   homepage "https://github.com/iJimmy500/feline"
-  version "1.2.0"
+  version "1.2.1"
 
-  url "https://github.com/iJimmy500/feline/releases/download/v1.2.0/feline-1.2.0-macos.tar.gz"
-  sha256 "7249b10e0e279dc860fe6f7d976df10473fe692572ce55c4991265ce8e504893"
+  url "https://github.com/iJimmy500/feline/releases/download/v1.2.1/feline-1.2.1-macos.tar.gz"
+  sha256 "38589e11cc110deee1f33d94a2913dfa7907d2cbfb06d3aef23d54bc82f0d66f"
 
   # feline works without these, but they unlock extra capabilities
   depends_on "ffmpeg"      => :optional
